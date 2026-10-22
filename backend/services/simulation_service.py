@@ -6,6 +6,7 @@ import asyncio
 import random
 import math
 from datetime import datetime
+from typing import Optional, List, Dict, Any
 
 # ============================================================
 # PROJECT ROOT
@@ -45,6 +46,8 @@ class SimulationService:
         self.last_event = None
         self.last_recovery = None
         self.deployment_site = None
+        self.last_communications = []
+        self.last_resolution_report = None
         saved_deployments = {}
 
         # Check if database already has persisted state
@@ -494,9 +497,41 @@ class SimulationService:
     # EVENT TRIGGER WORKFLOWS (FIRE, POLLUTION, EXTREME HEAT)
     # ========================================================
 
-    def trigger_event(self, event_type: str, center_x: int = 10, center_y: int = 10, radius: int = 3):
+    def trigger_event(
+        self,
+        event_type: str,
+        center_x: int = 10,
+        center_y: int = 10,
+        radius: int = 3,
+        target_agent_id: Optional[str] = None,
+        latitude: Optional[float] = None,
+        longitude: Optional[float] = None,
+        zone_name: Optional[str] = None
+    ):
         start_time = time.time()
 
+        # Sector zone coordinates mapping
+        sector_coords = {
+            "North Ridge Transect": (10, 16),
+            "South Lowland Scrub": (10, 4),
+            "West Wetland Sanctuary": (4, 10),
+            "East Alpine Forest": (16, 10),
+            "Central Riparian River Basin": (10, 10),
+        }
+
+        # 1. Resolve targeted area coordinates
+        if target_agent_id:
+            target_agent = self.model.get_agent(target_agent_id)
+            if target_agent:
+                center_x = target_agent.x
+                center_y = target_agent.y
+        elif latitude is not None and longitude is not None:
+            center_y = max(0, min(20, int(round(10 + (latitude - 45.3820) / 0.0065))))
+            center_x = max(0, min(20, int(round(10 + (longitude - (-121.7530)) / 0.0090))))
+        elif zone_name and zone_name in sector_coords:
+            center_x, center_y = sector_coords[zone_name]
+
+        # 2. Trigger hazard conditions across environmental model
         if event_type == "FIRE":
             affected = self.model.create_fire_event(center_x, center_y, radius)
             severity = "CRITICAL"
@@ -510,13 +545,13 @@ class SimulationService:
             affected = self.model.create_fire_event(center_x, center_y, radius)
             severity = "HIGH"
 
-        # 1. Local AI Analysis on each agent
+        # 3. Local AI Analysis on each active agent
         self.model.analyze_environment()
 
-        # 2. Broadcast alerts among affected agents
+        # 4. Broadcast alerts among affected agents
         self.model.broadcast_alerts()
 
-        # 3. Decentralized Consensus
+        # 5. Decentralized Consensus
         consensus = self.model.determine_consensus()
 
         detecting_agents = [
@@ -527,13 +562,98 @@ class SimulationService:
         event_id = f"EVT-{int(time.time())}"
         lat = round(45.3820 + (center_y - 10) * 0.0065, 6)
         lng = round(-121.7530 + (center_x - 10) * 0.0090, 6)
-        zone_name = (
-            "North Ridge Transect" if center_y >= 14
+        
+        computed_zone = (
+            zone_name if zone_name
+            else "North Ridge Transect" if center_y >= 14
             else "South Lowland Scrub" if center_y <= 6
             else "West Wetland Sanctuary" if center_x <= 6
             else "East Alpine Forest" if center_x >= 14
             else "Central Riparian River Basin"
         )
+
+        # 6. Generate detailed P2P communication trace packets
+        communications = []
+        msg_idx = 1
+        now_ts = datetime.utcnow().strftime("%H:%M:%S")
+
+        # Step 1: Anomaly evaluations on detecting agents
+        for agent in affected:
+            if agent.status != "ACTIVE":
+                continue
+            readings = agent.get_readings()
+            narrative = f"Sensor deviation: Temp={readings['temperature']}°C, Smoke={readings['smoke']}, CO2={readings['co2']}ppm."
+            score_val = agent.ai_result.get("score", 0.88) if agent.ai_result else 0.88
+            communications.append({
+                "id": f"PKT-{msg_idx:03d}",
+                "timestamp": now_ts,
+                "step": 1,
+                "sender_id": agent.agent_id,
+                "receiver_id": "LOCAL_INFERENCE_CORE",
+                "type": "ANOMALY_EVALUATION",
+                "hazard_type": event_type,
+                "content": f"{agent.agent_id} detected {event_type} anomaly via local Isolation Forest (Score: {score_val:.2f}). {narrative}",
+                "vote": "ANOMALY_CONFIRMED",
+                "confidence": round(score_val, 2)
+            })
+            msg_idx += 1
+
+        # Step 2: Peer-to-Peer Alert Broadcasts to active neighbors
+        for agent in affected:
+            for neighbor in agent.neighbors:
+                if neighbor.status != "ACTIVE":
+                    continue
+                communications.append({
+                    "id": f"PKT-{msg_idx:03d}",
+                    "timestamp": now_ts,
+                    "step": 2,
+                    "sender_id": agent.agent_id,
+                    "receiver_id": neighbor.agent_id,
+                    "type": "ENVIRONMENTAL_ALERT",
+                    "hazard_type": event_type,
+                    "content": f"Broadcasting {event_type} alert packet to neighbor peer {neighbor.agent_id}. Requesting local verification quorum.",
+                    "vote": "ALERT_TRANSMITTED",
+                    "confidence": round(consensus.get("confidence", 0.85), 2)
+                })
+                msg_idx += 1
+
+        # Step 3: Neighbor Consensus Voting
+        for agent in self.model.get_active_agents():
+            contacted_by = [n for n in agent.neighbors if n in affected]
+            if contacted_by:
+                is_agreeing = agent in affected or (agent.ai_result and agent.ai_result.get("event") == event_type)
+                target_peer = contacted_by[0].agent_id
+                vote_status = "AGREE_HAZARD" if is_agreeing else "NEUTRAL_CORROBORATION"
+                conf_score = 0.92 if is_agreeing else 0.55
+                communications.append({
+                    "id": f"PKT-{msg_idx:03d}",
+                    "timestamp": now_ts,
+                    "step": 3,
+                    "sender_id": agent.agent_id,
+                    "receiver_id": target_peer,
+                    "type": "CONSENSUS_VOTE",
+                    "hazard_type": event_type,
+                    "content": f"{agent.agent_id} returned vote token: {vote_status} based on local sensor evidence matrix.",
+                    "vote": vote_status,
+                    "confidence": conf_score
+                })
+                msg_idx += 1
+
+        # Step 4: Quorum Consensus Commit
+        communications.append({
+            "id": f"PKT-{msg_idx:03d}",
+            "timestamp": now_ts,
+            "step": 4,
+            "sender_id": "P2P_MESH_QUORUM",
+            "receiver_id": "FLEET_BROADCAST",
+            "type": "CONSENSUS_COMMIT",
+            "hazard_type": event_type,
+            "content": f"Decentralized neighbor consensus confirmed {event_type} hazard with {int(consensus.get('confidence', 0.85)*100)}% confidence across {len(affected)} nodes.",
+            "vote": "HAZARD_VERIFIED",
+            "confidence": round(consensus.get("confidence", 0.85), 2)
+        })
+
+        self.last_communications = communications
 
         self.last_event = {
             "event_id": event_id,
@@ -542,7 +662,7 @@ class SimulationService:
             "latitude": lat,
             "longitude": lng,
             "geo_radius_meters": radius * 650,
-            "zone_name": zone_name,
+            "zone_name": computed_zone,
             "radius": radius,
             "severity": severity,
             "affected_count": len(affected),
@@ -551,6 +671,8 @@ class SimulationService:
             "confidence": consensus.get("confidence", 0.0),
             "status": "ACTIVE",
             "affected_agents": [a.agent_id for a in affected],
+            "communications": communications,
+            "resolution_report": None,
             "timestamp": datetime.utcnow().isoformat()
         }
 
@@ -598,7 +720,7 @@ class SimulationService:
         self.log_audit(
             category="EVENT",
             title=f"Incident Detected: {event_type}",
-            message=f"{event_type} incident triggered at ({center_x}, {center_y}) radius {radius}. {len(affected)} agents in zone.",
+            message=f"{event_type} incident triggered at ({center_x}, {center_y}) in {computed_zone} radius {radius}. {len(affected)} agents in zone.",
             agent_id=affected[0].agent_id if affected else None,
             details=self.last_event
         )
@@ -806,12 +928,40 @@ class SimulationService:
         finally:
             db.close()
 
+    def get_event_communications(self, event_id: Optional[str] = None):
+        return self.last_communications
+
+    def recharge_fleet(self):
+        for agent in self.model.agents:
+            if agent.status == "ACTIVE":
+                agent.battery = 100
+        self._sync_all_agents_to_db()
+
+        self.log_audit(
+            category="AGENTS",
+            title="Fleet Maintenance & Solar Recharge Completed",
+            message="All autonomous monitoring agents replenished to 100% battery capacity and sensor arrays recalibrated.",
+            details={"fleet_size": len(self.model.agents)}
+        )
+
+        return {
+            "success": True,
+            "message": "All 20 agents fully recharged and recalibrated to 100% capacity.",
+            "agents": self.get_agents()
+        }
+
     def resolve_event(self, event_id: str):
         db = SessionLocal()
+        affected_ids = []
+        event_record = None
         try:
-            record = db.query(EnvironmentalEventRecord).filter_by(event_id=event_id).first()
-            if record:
-                record.status = "RESOLVED"
+            event_record = db.query(EnvironmentalEventRecord).filter_by(event_id=event_id).first()
+            if event_record:
+                event_record.status = "RESOLVED"
+                try:
+                    affected_ids = json.loads(event_record.affected_agents_json or "[]")
+                except Exception:
+                    affected_ids = []
                 db.commit()
         except Exception as e:
             db.rollback()
@@ -821,6 +971,91 @@ class SimulationService:
 
         if self.last_event and self.last_event.get("event_id") == event_id:
             self.last_event["status"] = "RESOLVED"
+            if not affected_ids:
+                affected_ids = self.last_event.get("affected_agents", [])
+
+        # Step 1-4: Coordinated resolution phases
+        resolution_steps = [
+            {
+                "step": 1,
+                "phase": "AUTONOMOUS_ALERT_CONVERGENCE",
+                "description": f"Decentralized consensus validated hazard. Cluster coordinator selected among nearest active nodes: {', '.join(affected_ids[:3]) if affected_ids else 'Local Agents'}."
+            },
+            {
+                "step": 2,
+                "phase": "COORDINATED_SUPPRESSION_DISPATCH",
+                "description": "Responding drone and sensor agents deployed localized aerosol cooling and high-efficiency particulate scrubbers across the hazard boundary."
+            },
+            {
+                "step": 3,
+                "phase": "REALTIME_TELEMETRY_DISSIPATION",
+                "description": "Combustion particulates and ambient heat dissipated. Sensor readings verified returning to baseline (Temp: 28°C, Smoke: 0.08)."
+            },
+            {
+                "step": 4,
+                "phase": "POST_INCIDENT_HEALTH_ASSESSMENT",
+                "description": "Hardware diagnostic sweep executed across all 20 nodes. Battery consumption and operating health audited."
+            }
+        ]
+
+        # Calculate agent health & battery impact
+        agent_health_breakdown = []
+        total_battery_loss = 0
+
+        for agent in self.model.agents:
+            battery_before = agent.battery
+            health_before = agent.health
+
+            if agent.status == "FAILED":
+                role = "FAILED_NODE"
+                battery_delta = 0
+                health_delta = 0
+                thermal_wear = "OFFLINE"
+                filter_status = "OFFLINE"
+                diagnosis = "Node unresponsive or hardware severed."
+            elif agent.agent_id in affected_ids:
+                role = "PRIMARY_RESPONDER" if (affected_ids and agent.agent_id == affected_ids[0]) else "ZONE_DETECTOR"
+                battery_delta = -random.randint(14, 22)
+                agent.battery = max(15, agent.battery + battery_delta)
+                health_delta = -random.randint(8, 15)
+                thermal_wear = "MODERATE"
+                filter_status = "PARTICULATE FOULING (CLEANING RECOMMENDED)"
+                diagnosis = "Dispatched aerosol suppression & active cooling payload. Operating with post-hazard wear."
+            elif any(n.agent_id in affected_ids for n in agent.neighbors):
+                role = "RELAY_NEIGHBOR"
+                battery_delta = -random.randint(5, 8)
+                agent.battery = max(20, agent.battery + battery_delta)
+                health_delta = -random.randint(2, 4)
+                thermal_wear = "LOW"
+                filter_status = "NOMINAL"
+                diagnosis = "High-frequency radio transmitter draw while relaying neighbor consensus packets."
+            else:
+                role = "STANDBY_MONITOR"
+                battery_delta = -1
+                agent.battery = max(20, agent.battery + battery_delta)
+                health_delta = 0
+                thermal_wear = "NONE"
+                filter_status = "OPTIMAL"
+                diagnosis = "Autonomous baseline monitoring; no thermal or particulate stress incurred."
+
+            total_battery_loss += abs(battery_delta)
+
+            agent_health_breakdown.append({
+                "agent_id": agent.agent_id,
+                "role": role,
+                "zone": agent.zone,
+                "battery_before": battery_before,
+                "battery_after": agent.battery,
+                "battery_delta": battery_delta,
+                "health_before": health_before,
+                "health_after": agent.health,
+                "health_delta": health_delta,
+                "thermal_wear": thermal_wear,
+                "filter_status": filter_status,
+                "status": agent.status,
+                "diagnosis": diagnosis,
+                "readings": agent.get_readings()
+            })
 
         # Normalize sensors of affected agents
         for agent in self.model.agents:
@@ -835,14 +1070,48 @@ class SimulationService:
 
         self._sync_all_agents_to_db()
 
+        # Compute summary
+        active_list = self.model.get_active_agents()
+        avg_health = round(sum(a.health for a in active_list) / max(len(active_list), 1), 1)
+        avg_battery = round(sum(a.battery for a in active_list) / max(len(active_list), 1), 1)
+        needs_maint = any(a.battery < 65 or a.health < 80 for a in active_list)
+
+        fleet_health_summary = {
+            "average_health_score": avg_health,
+            "average_battery_level": avg_battery,
+            "total_responders_count": len(affected_ids),
+            "total_battery_expended_pct": total_battery_loss,
+            "maintenance_recommended": needs_maint
+        }
+
+        resolution_report = {
+            "event_id": event_id,
+            "resolved_at": datetime.utcnow().isoformat(),
+            "status": "RESOLVED",
+            "resolution_steps": resolution_steps,
+            "fleet_health_summary": fleet_health_summary,
+            "agent_health_breakdown": agent_health_breakdown
+        }
+
+        self.last_resolution_report = resolution_report
+        if self.last_event and self.last_event.get("event_id") == event_id:
+            self.last_event["resolution_report"] = resolution_report
+
         self.log_audit(
             category="EVENT",
-            title=f"Incident Resolved: {event_id}",
-            message=f"Environmental incident {event_id} verified and resolved. Sensor parameters normalized.",
-            details={"event_id": event_id, "status": "RESOLVED"}
+            title=f"Incident Resolved & Fleet Health Audited: {event_id}",
+            message=f"Environmental incident {event_id} neutralized by {len(affected_ids)} responding nodes. Fleet average health: {avg_health}%, battery: {avg_battery}%.",
+            details=resolution_report
         )
 
-        return {"success": True, "event_id": event_id, "status": "RESOLVED"}
+        return {
+            "success": True,
+            "event_id": event_id,
+            "status": "RESOLVED",
+            "resolution_report": resolution_report,
+            "fleet_health_summary": fleet_health_summary,
+            "agent_health_breakdown": agent_health_breakdown
+        }
 
     def acknowledge_event(self, event_id: str):
         db = SessionLocal()

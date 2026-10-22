@@ -195,32 +195,58 @@ def trigger_agent_analysis(agent_id: str):
 
 @router.post("/events/fire")
 def create_fire_event(req: Optional[EventTriggerRequest] = None):
-    center_x = req.center_x if req else 10
-    center_y = req.center_y if req else 10
-    radius = req.radius if req else 3
-    return simulation_service.trigger_event("FIRE", center_x, center_y, radius)
+    return simulation_service.trigger_event(
+        event_type="FIRE",
+        center_x=req.center_x if req and req.center_x is not None else 10,
+        center_y=req.center_y if req and req.center_y is not None else 10,
+        radius=req.radius if req and req.radius is not None else 3,
+        target_agent_id=req.target_agent_id if req else None,
+        latitude=req.latitude if req else None,
+        longitude=req.longitude if req else None,
+        zone_name=req.zone_name if req else None
+    )
 
 
 @router.post("/events/pollution")
 def create_pollution_event(req: Optional[EventTriggerRequest] = None):
-    center_x = req.center_x if req else 10
-    center_y = req.center_y if req else 10
-    radius = req.radius if req else 3
-    return simulation_service.trigger_event("POLLUTION", center_x, center_y, radius)
+    return simulation_service.trigger_event(
+        event_type="POLLUTION",
+        center_x=req.center_x if req and req.center_x is not None else 10,
+        center_y=req.center_y if req and req.center_y is not None else 10,
+        radius=req.radius if req and req.radius is not None else 3,
+        target_agent_id=req.target_agent_id if req else None,
+        latitude=req.latitude if req else None,
+        longitude=req.longitude if req else None,
+        zone_name=req.zone_name if req else None
+    )
 
 
 @router.post("/events/extreme-heat")
 def create_extreme_heat_event(req: Optional[EventTriggerRequest] = None):
-    center_x = req.center_x if req else 10
-    center_y = req.center_y if req else 10
-    radius = req.radius if req else 3
-    return simulation_service.trigger_event("EXTREME_HEAT", center_x, center_y, radius)
+    return simulation_service.trigger_event(
+        event_type="EXTREME_HEAT",
+        center_x=req.center_x if req and req.center_x is not None else 10,
+        center_y=req.center_y if req and req.center_y is not None else 10,
+        radius=req.radius if req and req.radius is not None else 3,
+        target_agent_id=req.target_agent_id if req else None,
+        latitude=req.latitude if req else None,
+        longitude=req.longitude if req else None,
+        zone_name=req.zone_name if req else None
+    )
 
 
 @router.get("/events")
 def get_events():
     return {
         "events": simulation_service.get_events()
+    }
+
+
+@router.get("/events/{event_id}/communications")
+def get_event_communications(event_id: str):
+    return {
+        "event_id": event_id,
+        "communications": simulation_service.get_event_communications(event_id)
     }
 
 
@@ -232,6 +258,11 @@ def resolve_event(event_id: str):
 @router.post("/events/{event_id}/acknowledge")
 def acknowledge_event(event_id: str):
     return simulation_service.acknowledge_event(event_id)
+
+
+@router.post("/agents/recharge")
+def recharge_fleet():
+    return simulation_service.recharge_fleet()
 
 
 # ============================================================

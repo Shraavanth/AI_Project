@@ -59,9 +59,51 @@ class AgentDetailResponse(BaseModel):
 # ============================================================
 
 class EventTriggerRequest(BaseModel):
-    center_x: int = Field(10, ge=0, le=50)
-    center_y: int = Field(10, ge=0, le=50)
-    radius: int = Field(3, ge=1, le=15)
+    center_x: Optional[int] = Field(10, ge=0, le=50)
+    center_y: Optional[int] = Field(10, ge=0, le=50)
+    radius: Optional[int] = Field(3, ge=1, le=15)
+    target_agent_id: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    zone_name: Optional[str] = None
+
+
+class CommunicationPacket(BaseModel):
+    id: str
+    timestamp: str
+    step: int
+    sender_id: str
+    receiver_id: str
+    type: str
+    hazard_type: str
+    content: str
+    vote: Optional[str] = None
+    confidence: Optional[float] = None
+
+
+class AgentHealthItem(BaseModel):
+    agent_id: str
+    role: str
+    zone: str
+    battery_before: int
+    battery_after: int
+    battery_delta: int
+    health_before: int
+    health_after: int
+    health_delta: int
+    thermal_wear: str
+    filter_status: str
+    status: str
+    diagnosis: str
+
+
+class ResolutionReport(BaseModel):
+    event_id: str
+    resolved_at: str
+    status: str
+    resolution_steps: List[Dict[str, Any]]
+    fleet_health_summary: Dict[str, Any]
+    agent_health_breakdown: List[AgentHealthItem]
 
 
 class EventResponse(BaseModel):
@@ -77,6 +119,8 @@ class EventResponse(BaseModel):
     confidence: float
     status: str
     affected_agents: List[str]
+    communications: Optional[List[Dict[str, Any]]] = None
+    resolution_report: Optional[Dict[str, Any]] = None
 
 
 # ============================================================

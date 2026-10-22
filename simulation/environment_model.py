@@ -311,19 +311,20 @@ class EnvironmentalModel:
     # ========================================================
 
     def broadcast_alerts(self):
-
-        fire_agents = self.get_fire_agents()
+        anomalous_agents = [
+            agent for agent in self.get_active_agents()
+            if agent.ai_result and agent.ai_result.get("status") == "ANOMALY"
+        ]
 
         print(
             f"\n[COMMUNICATION] "
-            f"{len(fire_agents)} agents detected FIRE"
+            f"{len(anomalous_agents)} agents detected ANOMALOUS HAZARDS"
         )
 
-        for agent in fire_agents:
-
+        for agent in anomalous_agents:
             agent.broadcast_alert()
 
-        return fire_agents
+        return anomalous_agents
 
     # ========================================================
     # LOCAL / DISTRIBUTED CONSENSUS
