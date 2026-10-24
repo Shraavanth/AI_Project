@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { Agent } from "@/lib/types";
+import { Agent, formatAgentName } from "@/lib/types";
 import { api } from "@/lib/api";
 import {
   X,
@@ -151,13 +151,16 @@ export default function AgentDetailModal({ agent, onClose, onUpdate }: Props) {
         <div className="flex items-center justify-between pb-4 border-b border-border mb-4">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded bg-forest-green text-botanical flex items-center justify-center font-mono font-bold text-sm shadow-sm">
-              {agent.id}
+              {formatAgentName(agent.id, agent.name).replace("Drone ", "D")}
             </div>
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="font-serif font-bold text-base text-forest-green">
-                  {agent.agent_type || "Autonomous Sensor Node"}
+                  {formatAgentName(agent.id, agent.name)}
                 </h3>
+                <span className="text-xs text-secondary-text font-mono">
+                  ({agent.agent_type || "Autonomous Sensor Node"})
+                </span>
                 <span
                   className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold ${
                     agent.status === "ACTIVE"
@@ -169,7 +172,7 @@ export default function AgentDetailModal({ agent, onClose, onUpdate }: Props) {
                 </span>
               </div>
               <p className="text-xs text-secondary-text font-mono">
-                Transect: {lat}° N, {lng}° W | Sector: {agent.zone || "Cascade Transect"}
+                ID: {agent.id} · Transect: {lat}° N, {lng}° W | Sector: {agent.zone || "Cascade Transect"}
               </p>
             </div>
           </div>

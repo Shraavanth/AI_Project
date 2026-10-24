@@ -532,7 +532,44 @@ class SimulationService:
             center_x, center_y = sector_coords[zone_name]
 
         # 2. Trigger hazard conditions across environmental model
-        if event_type == "FIRE":
+        if latitude is not None and longitude is not None:
+            # Check geographic proximity for deployed agents
+            geo_radius_km = max(0.8, radius * 0.65)
+            geo_affected = []
+            for ag in self.model.agents:
+                if ag.latitude is not None and ag.longitude is not None:
+                    d_lat = (ag.latitude - latitude) * 111.32
+                    scale = max(0.01, math.cos(math.radians(latitude)))
+                    d_lng = (ag.longitude - longitude) * 111.32 * scale
+                    dist = math.sqrt(d_lat * d_lat + d_lng * d_lng)
+                    if dist <= geo_radius_km:
+                        geo_affected.append(ag)
+            if geo_affected:
+                for ag in geo_affected:
+                    if event_type == "FIRE":
+                        ag.temperature = round(random.uniform(43.5, 49.0), 1)
+                        ag.humidity = round(random.uniform(12.0, 24.0), 1)
+                        ag.smoke = round(random.uniform(0.72, 0.98), 2)
+                        ag.co2 = round(random.uniform(880.0, 1250.0), 1)
+                        ag.soil_moisture = round(random.uniform(10.0, 25.0), 1)
+                    elif event_type == "POLLUTION":
+                        ag.co2 = round(random.uniform(900.0, 1400.0), 1)
+                        ag.air_quality = round(random.uniform(150.0, 250.0), 1)
+                        ag.smoke = round(random.uniform(0.35, 0.65), 2)
+                    else:
+                        ag.temperature = round(random.uniform(42.5, 48.5), 1)
+                        ag.humidity = round(random.uniform(15.0, 28.0), 1)
+                affected = geo_affected
+                severity = "CRITICAL" if event_type == "FIRE" else "HIGH" if event_type == "POLLUTION" else "MEDIUM"
+            else:
+                if event_type == "FIRE":
+                    affected = self.model.create_fire_event(center_x, center_y, radius)
+                elif event_type == "POLLUTION":
+                    affected = self.model.create_pollution_event(center_x, center_y, radius)
+                else:
+                    affected = self.model.create_extreme_heat_event(center_x, center_y, radius)
+                severity = "HIGH"
+        elif event_type == "FIRE":
             affected = self.model.create_fire_event(center_x, center_y, radius)
             severity = "CRITICAL"
         elif event_type == "POLLUTION":
@@ -560,8 +597,8 @@ class SimulationService:
         ]
 
         event_id = f"EVT-{int(time.time())}"
-        lat = round(45.3820 + (center_y - 10) * 0.0065, 6)
-        lng = round(-121.7530 + (center_x - 10) * 0.0090, 6)
+        lat = latitude if latitude is not None else round(45.3820 + (center_y - 10) * 0.0065, 6)
+        lng = longitude if longitude is not None else round(-121.7530 + (center_x - 10) * 0.0090, 6)
         
         computed_zone = (
             zone_name if zone_name
@@ -572,7 +609,7 @@ class SimulationService:
             else "Central Riparian River Basin"
         )
 
-        # 6. Generate detailed P2P communication trace packets
+        # 6. Generate detailed P2P communication trace packets using simple friendly names
         communications = []
         msg_idx = 1
         now_ts = datetime.utcnow().strftime("%H:%M:%S")
@@ -581,37 +618,40 @@ class SimulationService:
         for agent in affected:
             if agent.status != "ACTIVE":
                 continue
+            s_name = getattr(agent, "simple_name", agent.agent_id)
             readings = agent.get_readings()
-            narrative = f"Sensor deviation: Temp={readings['temperature']}°C, Smoke={readings['smoke']}, CO2={readings['co2']}ppm."
+            narrative = f"Temp={readings['temperature']}°C, Smoke={readings['smoke']}, CO2={readings['co2']}ppm"
             score_val = agent.ai_result.get("score", 0.88) if agent.ai_result else 0.88
             communications.append({
                 "id": f"PKT-{msg_idx:03d}",
                 "timestamp": now_ts,
                 "step": 1,
-                "sender_id": agent.agent_id,
-                "receiver_id": "LOCAL_INFERENCE_CORE",
+                "sender_id": s_name,
+                "receiver_id": "Onboard AI",
                 "type": "ANOMALY_EVALUATION",
                 "hazard_type": event_type,
-                "content": f"{agent.agent_id} detected {event_type} anomaly via local Isolation Forest (Score: {score_val:.2f}). {narrative}",
+                "content": f"{s_name} flagged {event_type} anomaly ({narrative}).",
                 "vote": "ANOMALY_CONFIRMED",
                 "confidence": round(score_val, 2)
             })
             msg_idx += 1
 
-        # Step 2: Peer-to-Peer Alert Broadcasts to active neighbors
+        # Step 2: Peer-to-Peer Alert Broadcasts to active proximate neighbors
         for agent in affected:
+            s_name = getattr(agent, "simple_name", agent.agent_id)
             for neighbor in agent.neighbors:
                 if neighbor.status != "ACTIVE":
                     continue
+                n_name = getattr(neighbor, "simple_name", neighbor.agent_id)
                 communications.append({
                     "id": f"PKT-{msg_idx:03d}",
                     "timestamp": now_ts,
                     "step": 2,
-                    "sender_id": agent.agent_id,
-                    "receiver_id": neighbor.agent_id,
+                    "sender_id": s_name,
+                    "receiver_id": n_name,
                     "type": "ENVIRONMENTAL_ALERT",
                     "hazard_type": event_type,
-                    "content": f"Broadcasting {event_type} alert packet to neighbor peer {neighbor.agent_id}. Requesting local verification quorum.",
+                    "content": f"{s_name} -> {n_name}: Transmitted {event_type} alert packet. Requesting verification quorum.",
                     "vote": "ALERT_TRANSMITTED",
                     "confidence": round(consensus.get("confidence", 0.85), 2)
                 })
@@ -621,34 +661,37 @@ class SimulationService:
         for agent in self.model.get_active_agents():
             contacted_by = [n for n in agent.neighbors if n in affected]
             if contacted_by:
+                a_name = getattr(agent, "simple_name", agent.agent_id)
+                target_peer = contacted_by[0]
+                tp_name = getattr(target_peer, "simple_name", target_peer.agent_id)
                 is_agreeing = agent in affected or (agent.ai_result and agent.ai_result.get("event") == event_type)
-                target_peer = contacted_by[0].agent_id
                 vote_status = "AGREE_HAZARD" if is_agreeing else "NEUTRAL_CORROBORATION"
                 conf_score = 0.92 if is_agreeing else 0.55
                 communications.append({
                     "id": f"PKT-{msg_idx:03d}",
                     "timestamp": now_ts,
                     "step": 3,
-                    "sender_id": agent.agent_id,
-                    "receiver_id": target_peer,
+                    "sender_id": a_name,
+                    "receiver_id": tp_name,
                     "type": "CONSENSUS_VOTE",
                     "hazard_type": event_type,
-                    "content": f"{agent.agent_id} returned vote token: {vote_status} based on local sensor evidence matrix.",
+                    "content": f"{a_name} -> {tp_name}: Returned vote {vote_status} based on local sensor evidence.",
                     "vote": vote_status,
                     "confidence": conf_score
                 })
                 msg_idx += 1
 
         # Step 4: Quorum Consensus Commit
+        first_rep = getattr(affected[0], "simple_name", "Drone 1") if affected else "Drone 1"
         communications.append({
             "id": f"PKT-{msg_idx:03d}",
             "timestamp": now_ts,
             "step": 4,
-            "sender_id": "P2P_MESH_QUORUM",
-            "receiver_id": "FLEET_BROADCAST",
+            "sender_id": "P2P Quorum",
+            "receiver_id": "Fleet Broadcast",
             "type": "CONSENSUS_COMMIT",
             "hazard_type": event_type,
-            "content": f"Decentralized neighbor consensus confirmed {event_type} hazard with {int(consensus.get('confidence', 0.85)*100)}% confidence across {len(affected)} nodes.",
+            "content": f"Neighbor consensus confirmed {event_type} hazard with {int(consensus.get('confidence', 0.85)*100)}% confidence across {len(affected)} nodes. {first_rep} coordinating response.",
             "vote": "HAZARD_VERIFIED",
             "confidence": round(consensus.get("confidence", 0.85), 2)
         })
@@ -1042,6 +1085,7 @@ class SimulationService:
 
             agent_health_breakdown.append({
                 "agent_id": agent.agent_id,
+                "name": getattr(agent, "simple_name", agent.agent_id),
                 "role": role,
                 "zone": agent.zone,
                 "battery_before": battery_before,

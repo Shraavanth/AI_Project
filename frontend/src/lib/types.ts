@@ -1,5 +1,6 @@
 export interface Agent {
   id: string;
+  name?: string;
   position: [number, number];
   latitude?: number;
   longitude?: number;
@@ -203,3 +204,10 @@ export interface AnalyticsData {
   total_connections: number;
   network_connected: boolean;
 }
+
+export const formatAgentName = (id?: string | null, name?: string | null): string => {
+  if (name && name.trim()) return name;
+  if (!id) return "Agent";
+  const num = id.replace(/[^0-9]/g, "");
+  return num ? `Drone ${num}` : id;
+};

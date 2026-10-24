@@ -277,6 +277,12 @@ class MonitoringAgent:
         return "Central Riparian River Basin"
 
     @property
+    def simple_name(self):
+        digits = "".join(ch for ch in str(self.agent_id) if ch.isdigit())
+        idx = int(digits) if digits else 1
+        return f"Drone {idx}"
+
+    @property
     def agent_type(self):
         digits = "".join(ch for ch in str(self.agent_id) if ch.isdigit())
         idx = int(digits) if digits else 1
@@ -345,6 +351,7 @@ class MonitoringAgent:
 
         return {
             "id": self.agent_id,
+            "name": self.simple_name,
             "position": (self.x, self.y),
             "latitude": self.latitude,
             "longitude": self.longitude,

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { api } from "@/lib/api";
-import { Agent } from "@/lib/types";
+import { Agent, formatAgentName } from "@/lib/types";
 import AgentDetailModal from "@/components/AgentDetailModal";
 import { getAgentCoordinates } from "@/components/LiveMonitoringMap";
 import {
@@ -355,14 +355,14 @@ export default function AgentOperationsPage() {
                       <td className="py-3.5 px-4">
                         <div className="flex items-center gap-2.5">
                           <div className="w-8 h-8 rounded bg-forest-green text-botanical flex items-center justify-center font-mono font-bold text-xs shrink-0">
-                            {agent.id}
+                            {formatAgentName(agent.id, agent.name).replace("Drone ", "D")}
                           </div>
                           <div>
                             <div className="font-mono font-bold text-forest-green">
-                              {agent.id}
+                              {formatAgentName(agent.id, agent.name)}
                             </div>
-                            <div className="text-[11px] text-secondary-text font-medium">
-                              {agent.agent_type || "Sensor Node"}
+                            <div className="text-[10px] text-secondary-text font-mono">
+                              ID: {agent.id} · {agent.agent_type || "Sensor Node"}
                             </div>
                           </div>
                         </div>

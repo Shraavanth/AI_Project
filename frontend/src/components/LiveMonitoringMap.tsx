@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
-import { Agent, AgentDeployment, Incident } from "@/lib/types";
+import React, { useEffect, useRef, useState, useCallback } from "react";
+import { Agent, AgentDeployment, Incident, formatAgentName } from "@/lib/types";
 import { api } from "@/lib/api";
 import {
   Compass,
@@ -25,7 +25,9 @@ import {
   Sliders,
   Battery,
   LocateFixed,
-  MapPin
+  MapPin,
+  Zap,
+  Target
 } from "lucide-react";
 
 interface Props {
@@ -34,6 +36,7 @@ interface Props {
   onSelectAgent?: (agent: Agent) => void;
   selectedAgentId?: string | null;
   onRefresh?: () => void;
+  onHazardTriggered?: (event: Incident) => void;
 }
 
 // Deterministic simulation transect coordinates: Cascade Biosphere Reserve Transect
@@ -98,6 +101,7 @@ export default function LiveMonitoringMap({
   onSelectAgent,
   selectedAgentId,
   onRefresh,
+  onHazardTriggered,
 }: Props) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
@@ -133,6 +137,16 @@ export default function LiveMonitoringMap({
   const [isSelectingLocation, setIsSelectingLocation] = useState(false);
   const [patrolElapsedSeconds, setPatrolElapsedSeconds] = useState(0);
   const [locationError, setLocationError] = useState("");
+
+  // Interactive Hazard Placement State
+  const [isPlacingHazard, setIsPlacingHazard] = useState(false);
+  const [hazardType, setHazardType] = useState<"FIRE" | "POLLUTION" | "EXTREME_HEAT">("FIRE");
+  const [hazardRadiusKm, setHazardRadiusKm] = useState<number>(2.0);
+  const placingHazardRef = useRef(false);
+
+  // References for Leaflet click callbacks
+  const deployAgentsAtRef = useRef<((center: PatrolCenter) => Promise<void>) | null>(null);
+  const triggerHazardRef = useRef<((lat: number, lng: number) => Promise<void>) | null>(null);
 
   // Patrol loop
   useEffect(() => {
@@ -245,19 +259,31 @@ export default function LiveMonitoringMap({
         patrolAreaLayerRef.current = L.layerGroup().addTo(map);
 
         map.on("click", (event: { latlng: { lat: number; lng: number } }) => {
-          if (!selectingLocationRef.current) return;
-          const center = {
-            latitude: event.latlng.lat,
-            longitude: event.latlng.lng,
-            label: "Selected map location",
-          };
-          setPatrolCenter(center);
-          setLocationError("");
-          setPatrolElapsedSeconds(0);
-          setIsPatrolling(false);
-          selectingLocationRef.current = false;
-          setIsSelectingLocation(false);
-          map.setView([center.latitude, center.longitude], Math.max(map.getZoom(), 13));
+          if (placingHazardRef.current && triggerHazardRef.current) {
+            const lat = event.latlng.lat;
+            const lng = event.latlng.lng;
+            placingHazardRef.current = false;
+            setIsPlacingHazard(false);
+            void triggerHazardRef.current(lat, lng);
+            return;
+          }
+
+          if (selectingLocationRef.current && deployAgentsAtRef.current) {
+            const center = {
+              latitude: event.latlng.lat,
+              longitude: event.latlng.lng,
+              label: `Sector (${event.latlng.lat.toFixed(4)}, ${event.latlng.lng.toFixed(4)})`,
+            };
+            setPatrolCenter(center);
+            setLocationError("");
+            setPatrolElapsedSeconds(0);
+            setIsPatrolling(false);
+            selectingLocationRef.current = false;
+            setIsSelectingLocation(false);
+            map.setView([center.latitude, center.longitude], Math.max(map.getZoom(), 13));
+            void deployAgentsAtRef.current(center);
+            return;
+          }
         });
 
         mapInstanceRef.current = map;
@@ -414,9 +440,11 @@ export default function LiveMonitoringMap({
     });
 
     const renderedPairs = new Set<string>();
+    const isIncidentActive = Boolean(lastEvent && lastEvent.status === "ACTIVE");
+    const affectedAgentIds = new Set(lastEvent?.affected_agents || []);
 
     agents.forEach((agent) => {
-      if (agent.status === "FAILED" || droneCoordinates.has(agent.id)) return;
+      if (agent.status === "FAILED") return;
       const origin = agentCoordsMap.get(agent.id);
       if (!origin) return;
 
@@ -427,22 +455,22 @@ export default function LiveMonitoringMap({
         if (!dest) return;
 
         const neighborObj = agents.find((a) => a.id === nId);
-        if (
-          neighborObj &&
-          (neighborObj.status === "FAILED" || droneCoordinates.has(neighborObj.id))
-        ) return;
+        if (neighborObj && neighborObj.status === "FAILED") return;
 
         const pairKey = [agent.id, nId].sort().join("-");
         if (renderedPairs.has(pairKey)) return;
         renderedPairs.add(pairKey);
 
         const isHighlighted = isSelected || selectedAgentId === nId;
+        const isRespondingComm =
+          isIncidentActive &&
+          (affectedAgentIds.has(agent.id) || affectedAgentIds.has(nId));
 
         const line = L.polyline([origin, dest], {
-          color: isHighlighted ? "#193B32" : "#69786D",
-          weight: isHighlighted ? 2.5 : 1.2,
-          opacity: isHighlighted ? 0.9 : 0.45,
-          dashArray: isHighlighted ? undefined : "4, 6",
+          color: isRespondingComm ? "#C95B48" : isHighlighted ? "#193B32" : "#69786D",
+          weight: isRespondingComm ? 3.0 : isHighlighted ? 2.5 : 1.2,
+          opacity: isRespondingComm ? 0.95 : isHighlighted ? 0.9 : 0.45,
+          dashArray: isRespondingComm ? "5, 5" : isHighlighted ? undefined : "4, 6",
         });
 
         layer.addLayer(line);
@@ -568,14 +596,17 @@ export default function LiveMonitoringMap({
         ? "outline: 3px solid #C7F36B; outline-offset: 2px; box-shadow: 0 0 14px rgba(199, 243, 107, 0.8);"
         : "box-shadow: 0 2px 6px rgba(25, 59, 50, 0.15);";
 
+      const simpleName = formatAgentName(agent.id, agent.name);
+      const shortBadge = simpleName.replace("Drone ", "D");
+
       const icon = L.divIcon({
         className: "agent-custom-marker",
         html: `
           <div style="
-            width: 30px;
-            height: 30px;
-            margin-left: -15px;
-            margin-top: -15px;
+            width: 32px;
+            height: 32px;
+            margin-left: -16px;
+            margin-top: -16px;
             border-radius: 50%;
             background: ${bgColor};
             border: 2px solid ${borderColor};
@@ -591,7 +622,7 @@ export default function LiveMonitoringMap({
             position: relative;
             ${ringClass}
           ">
-            <span>${agent.id}</span>
+            <span>${shortBadge}</span>
             <span style="
               position: absolute;
               bottom: -2px;
@@ -618,7 +649,7 @@ export default function LiveMonitoringMap({
       marker.bindTooltip(
         `<div style="font-family: var(--font-sans); font-size: 11px; padding: 3px 6px;">
           <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-            <strong style="color: #193B32; font-family: var(--font-mono);">${agent.id}</strong>
+            <strong style="color: #193B32; font-family: var(--font-mono);">${simpleName}</strong>
             <span style="font-size: 9px; font-weight: 600; color: ${borderColor};">${statusTag}</span>
           </div>
           <div style="font-size: 10px; color: #456B57; margin-bottom: 2px;">${agent.agent_type || "Autonomous Sensor Node"}${isPatrollingDrone ? " · SIMULATED PATROL" : ""}</div>
@@ -736,6 +767,50 @@ export default function LiveMonitoringMap({
     }
   };
 
+  const PRESET_SECTORS = [
+    { label: "North Ridge", lat: BASE_LAT + 6 * LAT_STEP, lng: BASE_LNG },
+    { label: "Central Basin", lat: BASE_LAT, lng: BASE_LNG },
+    { label: "West Wetland", lat: BASE_LAT, lng: BASE_LNG - 6 * LNG_STEP },
+    { label: "South Lowland", lat: BASE_LAT - 6 * LAT_STEP, lng: BASE_LNG },
+  ];
+
+  const triggerHazardAtLocation = useCallback(
+    async (lat: number, lng: number) => {
+      setActionLoading(true);
+      setLocationError("");
+      setFeedbackNotice(`Deploying ${hazardType} hazard at (${lat.toFixed(4)}, ${lng.toFixed(4)})...`);
+      try {
+        const gridRadius = Math.max(1, Math.round(hazardRadiusKm * 1.5));
+        let result: Incident;
+        if (hazardType === "FIRE") {
+          result = await api.createFireEvent({ latitude: lat, longitude: lng, radius: gridRadius });
+        } else if (hazardType === "POLLUTION") {
+          result = await api.createPollutionEvent({ latitude: lat, longitude: lng, radius: gridRadius });
+        } else {
+          result = await api.createExtremeHeatEvent({ latitude: lat, longitude: lng, radius: gridRadius });
+        }
+        setFeedbackNotice(`🚨 ${hazardType} hazard placed at (${lat.toFixed(3)}, ${lng.toFixed(3)}). Proximate drones communicating...`);
+        setTimeout(() => setFeedbackNotice(""), 4500);
+        if (onHazardTriggered) onHazardTriggered(result);
+        if (onRefresh) onRefresh();
+      } catch (err: any) {
+        console.error("Failed to trigger hazard:", err);
+        setLocationError(`Could not trigger hazard: ${err.message}`);
+      } finally {
+        setActionLoading(false);
+      }
+    },
+    [hazardType, hazardRadiusKm, onHazardTriggered, onRefresh]
+  );
+
+  useEffect(() => {
+    triggerHazardRef.current = triggerHazardAtLocation;
+  }, [triggerHazardAtLocation]);
+
+  useEffect(() => {
+    deployAgentsAtRef.current = deployAgentsAt;
+  });
+
   const handleUseCurrentLocation = () => {
     setLocationError("");
     if (!navigator.geolocation) {
@@ -776,6 +851,21 @@ export default function LiveMonitoringMap({
     const selecting = !isSelectingLocation;
     selectingLocationRef.current = selecting;
     setIsSelectingLocation(selecting);
+    if (selecting) {
+      placingHazardRef.current = false;
+      setIsPlacingHazard(false);
+    }
+    setLocationError("");
+  };
+
+  const handleTogglePlaceHazard = () => {
+    const placing = !isPlacingHazard;
+    placingHazardRef.current = placing;
+    setIsPlacingHazard(placing);
+    if (placing) {
+      selectingLocationRef.current = false;
+      setIsSelectingLocation(false);
+    }
     setLocationError("");
   };
   const deploymentChanged =
@@ -877,83 +967,239 @@ export default function LiveMonitoringMap({
 
       {/* Main Map View Area */}
       <div className="relative flex-1 w-full h-full bg-[#EDECE4]">
-        <div className="absolute top-3 left-4 z-20 max-w-[calc(100%-2rem)] rounded border border-border bg-surface/95 p-3 shadow-elevated backdrop-blur">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={handleUseCurrentLocation}
-              disabled={actionLoading}
-              className="flex items-center gap-1.5 rounded border border-border bg-surface px-2.5 py-1.5 text-[11px] font-mono text-forest-green transition hover:bg-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-forest-green"
-            >
-              <LocateFixed className="h-3.5 w-3.5" aria-hidden="true" />
-              {actionLoading ? "Deploying…" : "Deploy at my location"}
-            </button>
+        {/* Floating Command Control Panel */}
+        <div className="absolute top-3 left-4 z-20 max-w-[calc(100%-2rem)] rounded border border-border bg-surface/95 p-3 shadow-elevated backdrop-blur space-y-2">
+          {/* Action Row 1: Fleet Deployment & Preset Sectors */}
+          <div className="flex flex-wrap items-center gap-1.5 pb-2 border-b border-border/60">
+            <span className="text-[10px] font-mono font-bold text-forest-green uppercase tracking-wide mr-1 flex items-center gap-1">
+              <MapPin className="w-3 h-3 text-secondary-green" /> Fleet:
+            </span>
+
             <button
               type="button"
               onClick={handleChooseMapLocation}
               disabled={actionLoading}
               aria-pressed={isSelectingLocation}
-              className={`flex items-center gap-1.5 rounded border px-2.5 py-1.5 text-[11px] font-mono transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-forest-green ${
+              className={`flex items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] font-mono transition focus-visible:outline focus-visible:outline-2 ${
                 isSelectingLocation
-                  ? "border-forest-green bg-forest-green text-surface"
+                  ? "border-forest-green bg-forest-green text-surface font-bold ring-2 ring-forest-green/30"
                   : "border-border bg-surface text-forest-green hover:bg-surface-muted"
               }`}
             >
-              <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
-              {isSelectingLocation ? "Click map to place drones…" : "Choose on map"}
+              <Target className="h-3 w-3" />
+              {isSelectingLocation ? "Click map to deploy fleet…" : "Select on map"}
             </button>
-            <label className="flex items-center gap-2 text-[10px] font-mono text-secondary-text">
-              <span>Patrol range</span>
+
+            {/* Quick Sector Presets */}
+            {PRESET_SECTORS.map((sec) => (
+              <button
+                key={sec.label}
+                type="button"
+                onClick={() => {
+                  void deployAgentsAt({
+                    latitude: sec.lat,
+                    longitude: sec.lng,
+                    label: sec.label,
+                  });
+                }}
+                disabled={actionLoading}
+                className="rounded border border-border bg-surface hover:bg-surface-muted px-2 py-1 text-[10px] font-mono text-secondary-text hover:text-forest-green transition"
+                title={`Deploy all 20 drones to ${sec.label}`}
+              >
+                {sec.label}
+              </button>
+            ))}
+
+            <button
+              type="button"
+              onClick={handleUseCurrentLocation}
+              disabled={actionLoading}
+              className="flex items-center gap-1 rounded border border-border bg-surface px-2 py-1 text-[10px] font-mono text-secondary-text hover:text-forest-green transition"
+              title="Deploy drones to device GPS coordinates"
+            >
+              <LocateFixed className="h-3 w-3" />
+              GPS
+            </button>
+
+            <div className="flex items-center gap-1.5 ml-auto text-[10px] font-mono text-secondary-text">
+              <span>Radius:</span>
               <input
                 type="range"
                 min="0.5"
-                max="10"
+                max="8"
                 step="0.5"
                 value={patrolRadiusKm}
-                onChange={(event) => {
-                  setPatrolRadiusKm(Number(event.target.value));
+                onChange={(e) => {
+                  setPatrolRadiusKm(Number(e.target.value));
                   setIsPatrolling(false);
                 }}
-                aria-label="Drone patrol radius in kilometers"
-                className="w-20 accent-forest-green"
+                className="w-16 accent-forest-green"
               />
-              <span className="w-10 text-forest-green">{patrolRadiusKm.toFixed(1)} km</span>
-            </label>
+              <span className="text-forest-green font-bold">{patrolRadiusKm.toFixed(1)}km</span>
+            </div>
+          </div>
+
+          {/* Action Row 2: Add Incident / Hazard Area */}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[10px] font-mono font-bold text-critical-incident uppercase tracking-wide mr-1 flex items-center gap-1">
+              <Flame className="w-3 h-3 text-critical-incident" /> Hazard:
+            </span>
+
             <button
               type="button"
-              onClick={() => void deployAgentsAt(patrolCenter)}
+              onClick={handleTogglePlaceHazard}
               disabled={actionLoading}
-              className="rounded bg-forest-green px-2.5 py-1.5 text-[11px] font-mono text-surface transition hover:bg-forest-green-light focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-forest-green disabled:cursor-wait disabled:opacity-60"
+              aria-pressed={isPlacingHazard}
+              className={`flex items-center gap-1.5 rounded border px-2.5 py-1 text-[11px] font-mono transition focus-visible:outline focus-visible:outline-2 ${
+                isPlacingHazard
+                  ? "border-critical-incident bg-critical-incident text-surface font-bold ring-2 ring-critical-incident/30 animate-pulse"
+                  : "border-critical-incident/40 bg-critical-incident/10 text-critical-incident hover:bg-critical-incident/20"
+              }`}
             >
-              {actionLoading ? "Deploying…" : "Deploy agents here"}
+              <AlertTriangle className="h-3 w-3" />
+              {isPlacingHazard ? "Click map to drop hazard…" : "Place Hazard on Map"}
             </button>
+
+            {/* Hazard Type Selector Pills */}
+            <div className="inline-flex rounded border border-border overflow-hidden text-[10px] font-mono">
+              <button
+                type="button"
+                onClick={() => setHazardType("FIRE")}
+                className={`px-2 py-0.5 flex items-center gap-1 transition ${
+                  hazardType === "FIRE"
+                    ? "bg-critical-incident text-surface font-bold"
+                    : "bg-surface hover:bg-surface-muted text-secondary-text"
+                }`}
+              >
+                <Flame className="w-2.5 h-2.5" /> Fire
+              </button>
+              <button
+                type="button"
+                onClick={() => setHazardType("POLLUTION")}
+                className={`px-2 py-0.5 flex items-center gap-1 transition border-l border-border ${
+                  hazardType === "POLLUTION"
+                    ? "bg-warning-amber text-forest-green font-bold"
+                    : "bg-surface hover:bg-surface-muted text-secondary-text"
+                }`}
+              >
+                <Wind className="w-2.5 h-2.5" /> Gas Plume
+              </button>
+              <button
+                type="button"
+                onClick={() => setHazardType("EXTREME_HEAT")}
+                className={`px-2 py-0.5 flex items-center gap-1 transition border-l border-border ${
+                  hazardType === "EXTREME_HEAT"
+                    ? "bg-critical-incident text-surface font-bold"
+                    : "bg-surface hover:bg-surface-muted text-secondary-text"
+                }`}
+              >
+                <Thermometer className="w-2.5 h-2.5" /> Heatwave
+              </button>
+            </div>
+
+            {/* Hazard Radius Selector */}
+            <div className="flex items-center gap-1 text-[10px] font-mono text-secondary-text ml-auto">
+              <span>Spread:</span>
+              <button
+                type="button"
+                onClick={() => setHazardRadiusKm(1.5)}
+                className={`px-1.5 py-0.5 rounded text-[9px] border ${
+                  hazardRadiusKm === 1.5
+                    ? "bg-forest-green text-surface border-forest-green"
+                    : "border-border text-secondary-text hover:bg-surface-muted"
+                }`}
+              >
+                1.5km
+              </button>
+              <button
+                type="button"
+                onClick={() => setHazardRadiusKm(3.0)}
+                className={`px-1.5 py-0.5 rounded text-[9px] border ${
+                  hazardRadiusKm === 3.0
+                    ? "bg-forest-green text-surface border-forest-green"
+                    : "border-border text-secondary-text hover:bg-surface-muted"
+                }`}
+              >
+                3.0km
+              </button>
+              <button
+                type="button"
+                onClick={() => setHazardRadiusKm(5.0)}
+                className={`px-1.5 py-0.5 rounded text-[9px] border ${
+                  hazardRadiusKm === 5.0
+                    ? "bg-forest-green text-surface border-forest-green"
+                    : "border-border text-secondary-text hover:bg-surface-muted"
+                }`}
+              >
+                5.0km
+              </button>
+            </div>
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] font-mono text-secondary-text">
+
+          {/* Active Guidance Banner for Hazard Mode */}
+          {isPlacingHazard && (
+            <div className="p-2 rounded bg-critical-incident/10 border border-critical-incident/40 text-critical-incident text-[11px] font-mono flex items-center justify-between animate-pulse">
+              <span className="flex items-center gap-1.5">
+                <Target className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  <strong>HAZARD PLACEMENT ACTIVE:</strong> Click anywhere on the map to trigger <strong>{hazardType}</strong> ({hazardRadiusKm} km). Proximate drones will automatically communicate and resolve it!
+                </span>
+              </span>
+              <button
+                onClick={() => {
+                  placingHazardRef.current = false;
+                  setIsPlacingHazard(false);
+                }}
+                className="underline ml-2 text-[10px] font-bold uppercase hover:opacity-80"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* Active Guidance Banner for Fleet Deployment Mode */}
+          {isSelectingLocation && (
+            <div className="p-2 rounded bg-forest-green/10 border border-forest-green/40 text-forest-green text-[11px] font-mono flex items-center justify-between animate-pulse">
+              <span className="flex items-center gap-1.5">
+                <Compass className="w-3.5 h-3.5 shrink-0 text-secondary-green" />
+                <span>
+                  <strong>FLEET DEPLOYMENT ACTIVE:</strong> Click anywhere on the map to deploy all 20 drones immediately to that sector.
+                </span>
+              </span>
+              <button
+                onClick={() => {
+                  selectingLocationRef.current = false;
+                  setIsSelectingLocation(false);
+                }}
+                className="underline ml-2 text-[10px] font-bold uppercase hover:opacity-80"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {/* Real-time Fleet & Area Coordinates Status */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[9px] font-mono text-secondary-text pt-1">
             <span>
-              {patrolCenter.label}: {patrolCenter.latitude.toFixed(4)}, {patrolCenter.longitude.toFixed(4)}
+              Deployment: <strong>{patrolCenter.label}</strong> ({patrolCenter.latitude.toFixed(4)}°, {patrolCenter.longitude.toFixed(4)}°)
             </span>
+            <span>·</span>
             <span>
-              {agents.filter((agent) => agent.deployed).length} of {agents.length} agents deployed
+              {agents.filter((a) => a.status === "ACTIVE").length} of {agents.length} drones active
             </span>
-            <span>{activeDrones.length} active drone{activeDrones.length === 1 ? "" : "s"} detected</span>
-            <span>
-              {isPatrolling
-                ? "SIMULATED DRONE PATROL RUNNING"
-                : deploymentChanged
-                ? "DEPLOYMENT CHANGED — APPLY TO UPDATE"
-                : deployedSite
-                ? "AGENT POSITIONS SAVED"
-                : "READY TO DEPLOY"}
+            <span>·</span>
+            <span className={lastEvent && lastEvent.status === "ACTIVE" ? "text-critical-incident font-bold" : "text-secondary-green"}>
+              {lastEvent && lastEvent.status === "ACTIVE"
+                ? `🚨 ACTIVE HAZARD IN PROGRESS: ${lastEvent.event_type}`
+                : "TRANSECT NOMINAL"}
             </span>
           </div>
+
           {locationError && (
-            <p role="alert" className="mt-2 text-[11px] text-critical-incident">
+            <p role="alert" className="mt-1 text-[11px] text-critical-incident font-mono">
               {locationError}
             </p>
           )}
-          <p className="mt-1 text-[9px] text-secondary-text">
-            This updates simulated agent coordinates in the app backend; it does not control physical drones. Esri receives map tile requests for the displayed area.
-          </p>
         </div>
 
         {/* Tile error or fallback banner */}
@@ -992,7 +1238,10 @@ export default function LiveMonitoringMap({
             <div className="flex items-center justify-between pb-2 border-b border-border">
               <div className="flex items-center gap-2">
                 <span className="font-mono font-bold text-sm text-forest-green">
-                  {selectedAgent.id}
+                  {formatAgentName(selectedAgent.id, selectedAgent.name)}
+                </span>
+                <span className="text-[10px] text-secondary-text font-mono">
+                  ({selectedAgent.id})
                 </span>
                 <span
                   className={`text-[9px] font-mono px-1.5 py-0.5 rounded font-semibold ${

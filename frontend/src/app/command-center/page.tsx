@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { api } from "@/lib/api";
-import { Agent, SystemStatus, AuditLog, Incident, AnalyticsData } from "@/lib/types";
+import { Agent, SystemStatus, AuditLog, Incident, AnalyticsData, formatAgentName } from "@/lib/types";
 import LiveMonitoringMap from "@/components/LiveMonitoringMap";
 import AgentDetailModal from "@/components/AgentDetailModal";
 import {
@@ -22,7 +22,11 @@ import {
   Cpu,
   ChevronRight,
   Check,
-  RefreshCw
+  RefreshCw,
+  Battery,
+  Zap,
+  ShieldCheck,
+  X
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -46,6 +50,23 @@ export default function CommandCenterPage() {
   const [loading, setLoading] = useState(true);
   const [lastUpdateTime, setLastUpdateTime] = useState<string>("Syncing...");
   const [actionMsg, setActionMsg] = useState<string>("");
+
+  // Automated Incident Resolution & Communication States
+  const [autoResolvingId, setAutoResolvingId] = useState<string | null>(null);
+  const [autoStep, setAutoStep] = useState<number>(0);
+  const [autoStepLabel, setAutoStepLabel] = useState<string>("");
+  const [resolutionReport, setResolutionReport] = useState<any | null>(null);
+  const [liveComms, setLiveComms] = useState<
+    Array<{
+      id: string;
+      sender: string;
+      receiver: string;
+      message: string;
+      step: number;
+      time: string;
+    }>
+  >([]);
+  const [isRecharging, setIsRecharging] = useState<boolean>(false);
 
   const fetchData = async () => {
     try {
@@ -115,6 +136,122 @@ export default function CommandCenterPage() {
     return incidents.filter((i) => i.status === "ACTIVE");
   }, [incidents]);
 
+  // Automated Multi-Agent Resolution & Near-Agent Communication Loop
+  useEffect(() => {
+    if (activeIncidents.length === 0) {
+      if (autoResolvingId) {
+        setAutoResolvingId(null);
+        setAutoStep(0);
+      }
+      return;
+    }
+
+    const current = activeIncidents[0];
+    if (autoResolvingId === current.event_id) return;
+
+    setAutoResolvingId(current.event_id);
+    setAutoStep(1);
+    setAutoStepLabel("Detecting hazard & broadcasting emergency telemetry to near drones...");
+
+    // Determine responding drones with simple names
+    const affected = current.affected_agents || [];
+    const r1 = formatAgentName(affected[0] || "A1", agents.find((a) => a.id === affected[0])?.name);
+    const r2 = formatAgentName(affected[1] || affected[0] || "A2", agents.find((a) => a.id === affected[1])?.name);
+    const r3 = formatAgentName(affected[2] || affected[0] || "A3", agents.find((a) => a.id === affected[2])?.name);
+
+    const now = new Date().toLocaleTimeString();
+
+    // Step 1: Emergency Transmission to Near Agents (immediate)
+    setLiveComms((prev) => [
+      {
+        id: `comms-${Date.now()}-1`,
+        sender: r1,
+        receiver: r2,
+        message: `🚨 Emergency telemetry: ${current.event_type} anomaly detected at sector coordinates. Initiating P2P broadcast.`,
+        step: 1,
+        time: now,
+      },
+      ...prev.slice(0, 8),
+    ]);
+
+    // Step 2: Near-Agent Verification & Consensus (after 1200ms)
+    const t1 = setTimeout(() => {
+      setAutoStep(2);
+      setAutoStepLabel(`Neighbor consensus quorum verified by ${r2} & ${r3}...`);
+      setLiveComms((prev) => [
+        {
+          id: `comms-${Date.now()}-2`,
+          sender: r2,
+          receiver: r1,
+          message: `✅ Quorum verified (${Math.round((current.confidence || 0.88) * 100)}% consensus). Committing perimeter containment.`,
+          step: 2,
+          time: new Date().toLocaleTimeString(),
+        },
+        {
+          id: `comms-${Date.now()}-3`,
+          sender: r3,
+          receiver: r1,
+          message: `🤝 Formation locked with ${r2}. Synchronizing suppression countermeasures.`,
+          step: 2,
+          time: new Date().toLocaleTimeString(),
+        },
+        ...prev.slice(0, 8),
+      ]);
+    }, 1200);
+
+    // Step 3: Autonomous Suppression Countermeasures (after 2500ms)
+    const t2 = setTimeout(() => {
+      setAutoStep(3);
+      setAutoStepLabel(`Autonomous suppression active: ${r1} & ${r2} deploying cooling & scrubbers...`);
+      setLiveComms((prev) => [
+        {
+          id: `comms-${Date.now()}-4`,
+          sender: `${r1} & ${r2}`,
+          receiver: "Hazard Epicenter",
+          message: `🛡️ Autonomous suppression payload deployed: aerosol cooling & high-efficiency particulate scrubbers active.`,
+          step: 3,
+          time: new Date().toLocaleTimeString(),
+        },
+        ...prev.slice(0, 8),
+      ]);
+    }, 2500);
+
+    // Step 4: Automatic Resolution & Health Assessment (after 4000ms)
+    const t3 = setTimeout(async () => {
+      setAutoStep(4);
+      setAutoStepLabel("Neutralizing hazard & auditing post-incident drone health...");
+      try {
+        const res = await api.resolveEvent(current.event_id);
+        const report = res.resolution_report || res;
+        setResolutionReport(report);
+        setLiveComms((prev) => [
+          {
+            id: `comms-${Date.now()}-5`,
+            sender: "Decentralized Quorum",
+            receiver: "Command Center",
+            message: `✅ Incident Neutralized! Sector restored to baseline. Drones audited for post-hazard health.`,
+            step: 4,
+            time: new Date().toLocaleTimeString(),
+          },
+          ...prev.slice(0, 8),
+        ]);
+        setActionMsg(`✅ Incident ${current.event_id} autonomously resolved by ${r1} & ${r2}. Telemetry restored.`);
+        setTimeout(() => setActionMsg(""), 6000);
+        await fetchData();
+      } catch (err) {
+        console.error("Auto resolution error:", err);
+      } finally {
+        setTimeout(() => setAutoStep(0), 1200);
+      }
+    }, 4000);
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [activeIncidents, autoResolvingId, agents]);
+
   // Acknowledge / Resolve Incident Handlers
   const handleAcknowledge = async (eventId: string) => {
     try {
@@ -129,12 +266,45 @@ export default function CommandCenterPage() {
 
   const handleResolve = async (eventId: string) => {
     try {
-      await api.resolveEvent(eventId);
-      setActionMsg(`Incident ${eventId} marked as resolved.`);
-      setTimeout(() => setActionMsg(""), 3000);
+      const res = await api.resolveEvent(eventId);
+      setResolutionReport(res.resolution_report || res);
+      setActionMsg(`Incident ${eventId} neutralized. Drone health audited.`);
+      setTimeout(() => setActionMsg(""), 4000);
       fetchData();
     } catch (e: any) {
       alert(`Resolution failed: ${e.message}`);
+    }
+  };
+
+  const handleRechargeFleet = async () => {
+    setIsRecharging(true);
+    try {
+      await api.rechargeFleet();
+      setActionMsg("⚡ All drones recharged to 100% capacity and recalibrated.");
+      setTimeout(() => setActionMsg(""), 4000);
+      await fetchData();
+      if (resolutionReport?.agent_health_breakdown) {
+        setResolutionReport((prev: any) => ({
+          ...prev,
+          agent_health_breakdown: prev.agent_health_breakdown.map((a: any) => ({
+            ...a,
+            battery_after: 100,
+            battery_delta: 0,
+            health_after: 100,
+            diagnosis: "Recalibrated and fully recharged to 100%.",
+          })),
+          fleet_health_summary: {
+            ...prev.fleet_health_summary,
+            average_battery_level: 100,
+            average_health_score: 100,
+            maintenance_recommended: false,
+          },
+        }));
+      }
+    } catch (err: any) {
+      alert(`Recharge failed: ${err.message}`);
+    } finally {
+      setIsRecharging(false);
     }
   };
 
@@ -259,6 +429,125 @@ export default function CommandCenterPage() {
         </div>
       )}
 
+      {/* Post-Hazard Fleet Health Assessment Banner (Displays when hazard is resolved) */}
+      {resolutionReport && (
+        <div className="bg-surface rounded border border-border shadow-elevated p-4 animate-fade-in border-l-4 border-l-forest-green">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-border gap-2">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-secondary-green" />
+              <div>
+                <h3 className="font-serif font-bold text-sm text-forest-green">
+                  Incident Neutralized: Responding Drone Health & Battery Audit
+                </h3>
+                <p className="text-[11px] text-secondary-text font-mono">
+                  Autonomous suppression successful. Telemetry returned to nominal baseline.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleRechargeFleet}
+                disabled={isRecharging}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded bg-forest-green text-surface hover:bg-forest-green-light transition text-xs font-mono font-bold shadow-sm"
+              >
+                <Zap className="w-3.5 h-3.5 text-botanical" />
+                {isRecharging ? "Recharging Drones…" : "⚡ Recharge All Drones"}
+              </button>
+              <button
+                onClick={() => setResolutionReport(null)}
+                className="text-secondary-text hover:text-forest-green p-1 rounded"
+                title="Dismiss health audit"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Metrics Bar */}
+          {resolutionReport.fleet_health_summary && (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 py-3 border-b border-border text-xs">
+              <div className="bg-surface-muted p-2 rounded border border-border/60">
+                <span className="text-[9px] font-mono text-secondary-text block">PRIMARY RESPONDERS</span>
+                <span className="font-mono font-bold text-forest-green text-sm">
+                  {resolutionReport.fleet_health_summary.total_responders_count || 1} Drones
+                </span>
+              </div>
+              <div className="bg-surface-muted p-2 rounded border border-border/60">
+                <span className="text-[9px] font-mono text-secondary-text block">TOTAL BATTERY DRAW</span>
+                <span className="font-mono font-bold text-warning-amber text-sm">
+                  -{resolutionReport.fleet_health_summary.total_battery_expended_pct || 18}%
+                </span>
+              </div>
+              <div className="bg-surface-muted p-2 rounded border border-border/60">
+                <span className="text-[9px] font-mono text-secondary-text block">AVERAGE FLEET HEALTH</span>
+                <span className="font-mono font-bold text-forest-green text-sm">
+                  {resolutionReport.fleet_health_summary.average_health_score || 94}%
+                </span>
+              </div>
+              <div className="bg-surface-muted p-2 rounded border border-border/60">
+                <span className="text-[9px] font-mono text-secondary-text block">FLEET STATUS</span>
+                <span className="font-mono font-bold text-forest-green text-sm">
+                  NOMINAL (READY)
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Responder Drones Breakdown Cards */}
+          {resolutionReport.agent_health_breakdown && (
+            <div className="mt-3">
+              <span className="text-[10px] font-mono font-bold text-secondary-text uppercase tracking-wider block mb-2">
+                Individual Drone Performance & Wear Breakdown:
+              </span>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5 max-h-52 overflow-y-auto pr-1">
+                {resolutionReport.agent_health_breakdown
+                  .filter((a: any) => a.role !== "STANDBY_MONITOR" && a.role !== "FAILED_NODE")
+                  .slice(0, 6)
+                  .map((agent: any) => {
+                    const simpleName = formatAgentName(agent.agent_id, agent.name);
+                    return (
+                      <div
+                        key={agent.agent_id}
+                        className="p-2.5 rounded bg-surface border border-border text-xs space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          <strong className="font-mono text-forest-green font-bold text-[11px]">
+                            {simpleName}
+                          </strong>
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-muted-sage text-forest-green font-mono">
+                            {agent.role.replace("_", " ")}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
+                          <div>
+                            <span className="text-secondary-text block">Battery:</span>
+                            <span className="font-bold text-forest-green">
+                              {agent.battery_after}%{" "}
+                              <span className="text-critical-incident">({agent.battery_delta}%)</span>
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-secondary-text block">Health:</span>
+                            <span className="font-bold text-forest-green">
+                              {agent.health_after}%{" "}
+                              {agent.health_delta !== 0 && (
+                                <span className="text-warning-amber">({agent.health_delta}%)</span>
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                        <p className="text-[10px] text-secondary-text italic leading-tight">
+                          {agent.diagnosis}
+                        </p>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 3. MAIN SECTION: MAP (68%) + NARROW SIDE PANEL (32%) */}
       <div className="flex flex-col lg:flex-row gap-6 items-stretch">
         {/* MAP COLUMN (68% width on desktop) */}
@@ -271,6 +560,9 @@ export default function CommandCenterPage() {
               setSelectedAgent(agent);
             }}
             onRefresh={fetchData}
+            onHazardTriggered={() => {
+              fetchData();
+            }}
           />
         </div>
 
@@ -301,43 +593,73 @@ export default function CommandCenterPage() {
                   </p>
                 </div>
               ) : (
-                activeIncidents.map((inc) => (
-                  <div
-                    key={inc.event_id}
-                    className="p-3 rounded bg-critical-incident/5 border border-critical-incident/25 text-xs space-y-2"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 font-mono font-bold text-critical-incident">
-                        <span>{inc.event_type}</span>
-                        <span className="text-[9px] px-1 py-0.2 rounded bg-critical-incident/15 text-critical-incident">
-                          {inc.severity}
+                activeIncidents.map((inc) => {
+                  const responderNames = (inc.affected_agents || [])
+                    .slice(0, 3)
+                    .map((id) => formatAgentName(id, agents.find((a) => a.id === id)?.name))
+                    .join(", ");
+
+                  return (
+                    <div
+                      key={inc.event_id}
+                      className="p-3 rounded bg-critical-incident/5 border border-critical-incident/25 text-xs space-y-2.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5 font-mono font-bold text-critical-incident">
+                          <span>{inc.event_type}</span>
+                          <span className="text-[9px] px-1 py-0.2 rounded bg-critical-incident/15 text-critical-incident">
+                            {inc.severity}
+                          </span>
+                        </div>
+                        <span className="text-[10px] font-mono text-secondary-text">
+                          {inc.consensus_state} ({Math.round(inc.confidence * 100)}%)
                         </span>
                       </div>
-                      <span className="text-[10px] font-mono text-secondary-text">
-                        {inc.consensus_state} ({Math.round(inc.confidence * 100)}%)
-                      </span>
-                    </div>
 
-                    <p className="text-[11px] text-secondary-text leading-tight">
-                      Affecting {inc.affected_count} field nodes in {inc.zone_name || "Central Basin"}.
-                    </p>
+                      <p className="text-[11px] text-secondary-text leading-tight">
+                        Responding: <strong className="text-forest-green font-mono">{responderNames || "Near Drones"}</strong> in {inc.zone_name || "Central Basin"}.
+                      </p>
 
-                    <div className="pt-2 border-t border-critical-incident/20 flex items-center justify-end gap-2">
-                      <button
-                        onClick={() => handleAcknowledge(inc.event_id)}
-                        className="px-2.5 py-1 rounded bg-surface hover:bg-surface-muted border border-border text-[10px] font-mono text-forest-green transition"
-                      >
-                        Acknowledge
-                      </button>
-                      <button
-                        onClick={() => handleResolve(inc.event_id)}
-                        className="px-2.5 py-1 rounded bg-forest-green hover:bg-forest-green-light text-[10px] font-mono text-surface transition"
-                      >
-                        Resolve Hazard
-                      </button>
+                      {/* Autonomous Resolution Stepper */}
+                      {autoStep > 0 && autoResolvingId === inc.event_id && (
+                        <div className="p-2 rounded bg-surface border border-forest-green/30 text-[10px] font-mono space-y-1 animate-pulse">
+                          <div className="flex items-center justify-between text-forest-green font-bold">
+                            <span className="flex items-center gap-1">
+                              <Radio className="w-3 h-3 text-secondary-green animate-pulse" />
+                              AUTONOMOUS RESOLUTION (STEP {autoStep}/4)
+                            </span>
+                            <span>{autoStep * 25}%</span>
+                          </div>
+                          <div className="w-full bg-border rounded-full h-1.5 overflow-hidden">
+                            <div
+                              className="bg-forest-green h-full transition-all duration-500 rounded-full"
+                              style={{ width: `${autoStep * 25}%` }}
+                            ></div>
+                          </div>
+                          <p className="text-[9px] text-secondary-text italic truncate">
+                            {autoStepLabel}
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="pt-2 border-t border-critical-incident/20 flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => handleAcknowledge(inc.event_id)}
+                          className="px-2.5 py-1 rounded bg-surface hover:bg-surface-muted border border-border text-[10px] font-mono text-forest-green transition"
+                        >
+                          Acknowledge
+                        </button>
+                        <button
+                          onClick={() => handleResolve(inc.event_id)}
+                          className="px-2.5 py-1 rounded bg-forest-green hover:bg-forest-green-light text-[10px] font-mono text-surface font-bold transition flex items-center gap-1"
+                        >
+                          <Zap className="w-3 h-3 text-botanical" />
+                          Resolve Immediately
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>
@@ -351,23 +673,42 @@ export default function CommandCenterPage() {
                   AGENT P2P COMMUNICATIONS
                 </span>
               </div>
-              <span className="text-[9px] font-mono text-secondary-text">PEER MESH</span>
+              <span className="text-[9px] font-mono text-secondary-green font-bold flex items-center gap-1">
+                <Radio className="w-2.5 h-2.5 animate-pulse" /> LIVE RADIO
+              </span>
             </div>
 
-            <div className="mt-3 space-y-2.5">
-              {agentComms.length === 0 ? (
-                <div className="py-4 text-center text-xs text-secondary-text">
-                  Awaiting inter-agent transmissions...
+            <div className="mt-3 space-y-2.5 max-h-72 overflow-y-auto pr-1">
+              {/* Real-time Streaming Peer Packets */}
+              {liveComms.map((packet) => (
+                <div
+                  key={packet.id}
+                  className="p-2 rounded bg-botanical/10 border border-secondary-green/30 text-[11px] space-y-1 animate-fade-in"
+                >
+                  <div className="flex items-center justify-between text-[10px] font-mono text-forest-green font-bold">
+                    <span className="flex items-center gap-1">
+                      <Radio className="w-2.5 h-2.5 text-secondary-green" />
+                      {packet.sender} → {packet.receiver}
+                    </span>
+                    <span className="text-[9px] text-secondary-text font-normal">{packet.time}</span>
+                  </div>
+                  <p className="text-[10px] text-forest-green leading-tight font-mono">
+                    {packet.message}
+                  </p>
                 </div>
-              ) : (
-                agentComms.map((log) => (
+              ))}
+
+              {/* Historical Logs */}
+              {agentComms.map((log) => {
+                const nodeName = log.agent_id ? formatAgentName(log.agent_id) : "FLEET MESH";
+                return (
                   <div
                     key={log.id}
                     className="text-[11px] border-b border-border/60 pb-2 last:border-0 last:pb-0"
                   >
                     <div className="flex items-center justify-between text-[10px] text-secondary-text mb-0.5">
                       <span className="font-mono text-forest-green font-semibold">
-                        {log.agent_id ? `NODE ${log.agent_id}` : "MESH TOPOLOGY"}
+                        {nodeName}
                       </span>
                       <span className="font-mono text-[9px]">
                         {log.timestamp ? log.timestamp.split("T")[1]?.slice(0, 8) : "just now"}
@@ -377,8 +718,8 @@ export default function CommandCenterPage() {
                       {log.title}
                     </p>
                   </div>
-                ))
-              )}
+                );
+              })}
             </div>
           </div>
 
