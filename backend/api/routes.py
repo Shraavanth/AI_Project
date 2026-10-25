@@ -1,312 +1,245 @@
+"""
+REST API.
+
+Live state comes from the in-memory simulation engine; /api/history/* and
+/api/analytics read stored records from the database.
+"""
+
 from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Query
-from backend.services.simulation_service import simulation_service
+
 from backend.schemas.schemas import (
-    AgentDeploymentRequest,
-    AgentCreate,
-    AgentUpdate,
-    EventTriggerRequest
+    AgentCreate, DeployRequest, IncidentCreate, MoveRequest, SensorOverride, SpeedRequest, StepRequest,
 )
+from backend.services.simulation_service import HISTORY_CATEGORIES, get_service
+from agents.agent_types import AGENT_TYPES
+from ai.anomaly_detector import model_info
+from ai.event_classifier import RULES
+from simulation import config
 
-router = APIRouter(
-    prefix="/api",
-    tags=["Environmental Monitoring"]
-)
+router = APIRouter(prefix="/api", tags=["Environmental Monitoring"])
 
 
-# ============================================================
-# SYSTEM STATUS
-# ============================================================
+def svc():
+    return get_service()
+
+
+def _run(fn, *args, **kwargs):
+    """Turn engine errors into clear HTTP responses."""
+    try:
+        return fn(*args, **kwargs)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc).strip("'\""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+
+# ------------------------------------------------------------------ status / state
 
 @router.get("/status")
 def get_status():
-    return simulation_service.get_status()
+    return svc().status()
 
 
-# ============================================================
-# AGENTS
-# ============================================================
+@router.get("/state")
+def get_state():
+    """Full live snapshot (same payload as the WebSocket 'state' message)."""
+    return svc().snapshot()
 
-@router.get("/agents")
-def get_agents():
+
+@router.get("/config")
+def get_config():
     return {
-        "agents": simulation_service.get_agents()
+        "agent_types": AGENT_TYPES,
+        "incident_defaults": config.INCIDENT_DEFAULTS,
+        "response_plan": {k: [{"capability": c, "count": n, "optional": o} for c, n, o in v]
+                          for k, v in config.RESPONSE_PLAN.items()},
+        "classifier_rules": RULES,
+        "model": model_info(),
+        "comm_range_m": config.COMM_RANGE_M,
+        "max_relay_range_m": config.MAX_RELAY_RANGE_M,
+        "evidence_range_m": config.EVIDENCE_RANGE_M,
+        "consensus_threshold": config.CONSENSUS_THRESHOLD,
+        "consensus_min_support": config.CONSENSUS_MIN_SUPPORT,
+        "heartbeat_timeout_ticks": config.HEARTBEAT_TIMEOUT_TICKS,
+        "telemetry_timeout_ticks": config.TELEMETRY_TIMEOUT_TICKS,
+        "demo_location": {"lat": config.DEMO_LATITUDE, "lng": config.DEMO_LONGITUDE, "label": config.DEMO_LABEL},
+        "radius_limits_m": [config.MIN_RADIUS_M, config.MAX_RADIUS_M],
+        "default_radius_m": config.DEFAULT_RADIUS_M,
+        "allowed_speeds": list(config.ALLOWED_SPEEDS),
     }
 
 
-@router.get("/agents/deployment")
-def get_agent_deployment():
-    return {"deployment": simulation_service.get_deployment()}
+# ------------------------------------------------------------------ simulation control
+
+@router.post("/simulation/deploy")
+def deploy(req: DeployRequest):
+    return _run(svc().deploy, req.latitude, req.longitude, req.radius_m, req.label, req.source)
 
 
-@router.post("/agents/deploy")
-def deploy_agents(deployment: AgentDeploymentRequest):
-    try:
-        return simulation_service.deploy_agents(
-            latitude=deployment.latitude,
-            longitude=deployment.longitude,
-            radius_km=deployment.radius_km,
-            area_label=deployment.area_label,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+@router.post("/simulation/start")
+@router.post("/simulation/resume")
+def resume():
+    return svc().resume()
 
 
-@router.get("/agents/{agent_id}")
-def get_agent_detail(agent_id: str):
-    agent = simulation_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-    return agent
+@router.post("/simulation/pause")
+def pause():
+    return svc().pause()
+
+
+@router.post("/simulation/reset")
+def reset():
+    return svc().reset()
+
+
+@router.post("/simulation/speed")
+def set_speed(req: SpeedRequest):
+    return _run(svc().set_speed, req.speed)
+
+
+@router.post("/simulation/step")
+def step(req: StepRequest = StepRequest()):
+    """Advance a fixed number of ticks immediately (useful while paused and for tests)."""
+    return svc().step_once(req.ticks)
+
+
+# ------------------------------------------------------------------ agents
+
+@router.get("/agents")
+def list_agents():
+    return {"agents": svc().agents()}
 
 
 @router.post("/agents")
-def create_agent(agent_data: AgentCreate):
-    try:
-        new_agent = simulation_service.add_agent(agent_data.model_dump(exclude_unset=True))
-        return {
-            "success": True,
-            "message": f"Agent {new_agent['id']} created successfully.",
-            "agent": new_agent
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+def create_agent(req: AgentCreate):
+    return _run(svc().add_agent, req.agent_type, req.agent_id, req.latitude, req.longitude)
 
 
-@router.patch("/agents/{agent_id}")
-def update_agent(agent_id: str, updates: AgentUpdate):
-    agent = simulation_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-
-    update_dict = updates.model_dump(exclude_unset=True)
-    if not update_dict:
-        return agent
-
-    # Handle coordinates change if provided
-    if "x" in update_dict or "y" in update_dict:
-        new_x = update_dict.get("x", agent["position"][0])
-        new_y = update_dict.get("y", agent["position"][1])
-        simulation_service.move_agent(agent_id, new_x, new_y)
-
-    # Handle sensor updates
-    sensor_keys = ["temperature", "humidity", "smoke", "co2", "air_quality", "soil_moisture", "battery"]
-    readings = {k: update_dict[k] for k in sensor_keys if k in update_dict}
-    if readings:
-        updated = simulation_service.update_agent_sensors(agent_id, readings)
-        return updated
-
-    return simulation_service.get_agent(agent_id)
-
-
-@router.post("/agents/{agent_id}/move-direction")
-def move_agent_direction(agent_id: str, direction: str = Query(..., description="UP, DOWN, LEFT, or RIGHT")):
-    agent = simulation_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-
-    res = simulation_service.move_agent_direction(agent_id, direction)
-    return {
-        "success": True,
-        "agent": res
-    }
-
-
-@router.post("/simulation/patrol-step")
-def simulation_patrol_step():
-    return simulation_service.step_patrol()
-
+@router.get("/agents/{agent_id}")
+def agent_detail(agent_id: str):
+    return _run(svc().agent_detail, agent_id)
 
 
 @router.delete("/agents/{agent_id}")
 def delete_agent(agent_id: str):
-    success = simulation_service.remove_agent(agent_id)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-    return {
-        "success": True,
-        "message": f"Agent {agent_id} deleted successfully."
-    }
+    _run(svc().remove_agent, agent_id)
+    return {"success": True, "removed": agent_id}
 
 
 @router.post("/agents/{agent_id}/fail")
 def fail_agent(agent_id: str):
-    agent = simulation_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-    if agent["status"] == "FAILED":
-        raise HTTPException(status_code=400, detail=f"Agent {agent_id} is already in FAILED state.")
-
-    failed = simulation_service.fail_agent(agent_id)
-    return {
-        "success": True,
-        "failed_agent": agent_id,
-        "agent": failed
-    }
+    return _run(svc().fail_agent, agent_id)
 
 
 @router.post("/agents/{agent_id}/restore")
 def restore_agent(agent_id: str):
-    agent = simulation_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-    if agent["status"] == "ACTIVE":
-        raise HTTPException(status_code=400, detail=f"Agent {agent_id} is already ACTIVE.")
-
-    restored = simulation_service.restore_agent(agent_id)
-    return {
-        "success": True,
-        "restored_agent": agent_id,
-        "agent": restored
-    }
+    return _run(svc().restore_agent, agent_id)
 
 
-@router.post("/agents/{agent_id}/restart")
-def restart_agent(agent_id: str):
-    agent = simulation_service.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-    restarted = simulation_service.restart_agent(agent_id)
-    return {
-        "success": True,
-        "restarted_agent": agent_id,
-        "agent": restarted
-    }
+@router.post("/agents/{agent_id}/move")
+def move_agent(agent_id: str, req: MoveRequest):
+    return _run(svc().move_agent, agent_id, req.latitude, req.longitude)
 
 
-@router.post("/agents/{agent_id}/analyze")
-def trigger_agent_analysis(agent_id: str):
-    agent = simulation_service.model.get_agent(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found.")
-
-    res = agent.analyze_environment()
-    simulation_service._sync_all_agents_to_db()
-    return {
-        "agent_id": agent_id,
-        "ai_result": res,
-        "ai_explanation": agent.get_ai_explanation()
-    }
+@router.post("/agents/{agent_id}/sensors")
+def override_sensors(agent_id: str, req: SensorOverride):
+    readings = req.model_dump(exclude={"duration_ticks"}, exclude_none=True)
+    if not readings:
+        raise HTTPException(status_code=400, detail="Provide at least one sensor value")
+    return _run(svc().override_sensors, agent_id, readings, req.duration_ticks)
 
 
-# ============================================================
-# ENVIRONMENTAL EVENTS / INCIDENTS
-# ============================================================
-
-@router.post("/events/fire")
-def create_fire_event(req: Optional[EventTriggerRequest] = None):
-    return simulation_service.trigger_event(
-        event_type="FIRE",
-        center_x=req.center_x if req and req.center_x is not None else 10,
-        center_y=req.center_y if req and req.center_y is not None else 10,
-        radius=req.radius if req and req.radius is not None else 3,
-        target_agent_id=req.target_agent_id if req else None,
-        latitude=req.latitude if req else None,
-        longitude=req.longitude if req else None,
-        zone_name=req.zone_name if req else None
-    )
+@router.delete("/agents/{agent_id}/sensors")
+def clear_override(agent_id: str):
+    return _run(svc().clear_override, agent_id)
 
 
-@router.post("/events/pollution")
-def create_pollution_event(req: Optional[EventTriggerRequest] = None):
-    return simulation_service.trigger_event(
-        event_type="POLLUTION",
-        center_x=req.center_x if req and req.center_x is not None else 10,
-        center_y=req.center_y if req and req.center_y is not None else 10,
-        radius=req.radius if req and req.radius is not None else 3,
-        target_agent_id=req.target_agent_id if req else None,
-        latitude=req.latitude if req else None,
-        longitude=req.longitude if req else None,
-        zone_name=req.zone_name if req else None
-    )
+@router.get("/agents/{agent_id}/messages")
+def agent_messages(agent_id: str, limit: int = Query(100, ge=1, le=500)):
+    _run(svc().agent_detail, agent_id)  # 404 if unknown
+    return {"messages": svc().live_messages(limit=limit, agent_id=agent_id)}
 
 
-@router.post("/events/extreme-heat")
-def create_extreme_heat_event(req: Optional[EventTriggerRequest] = None):
-    return simulation_service.trigger_event(
-        event_type="EXTREME_HEAT",
-        center_x=req.center_x if req and req.center_x is not None else 10,
-        center_y=req.center_y if req and req.center_y is not None else 10,
-        radius=req.radius if req and req.radius is not None else 3,
-        target_agent_id=req.target_agent_id if req else None,
-        latitude=req.latitude if req else None,
-        longitude=req.longitude if req else None,
-        zone_name=req.zone_name if req else None
-    )
+# ------------------------------------------------------------------ incidents & tasks
+
+@router.post("/incidents")
+def create_incident(req: IncidentCreate):
+    return _run(svc().create_incident, req.type, req.latitude, req.longitude, req.radius_m, req.severity)
 
 
-@router.get("/events")
-def get_events():
-    return {
-        "events": simulation_service.get_events()
-    }
+@router.get("/incidents")
+def list_incidents():
+    return {"incidents": svc().incidents()}
 
 
-@router.get("/events/{event_id}/communications")
-def get_event_communications(event_id: str):
-    return {
-        "event_id": event_id,
-        "communications": simulation_service.get_event_communications(event_id)
-    }
+@router.get("/incidents/{incident_id}")
+def incident_detail(incident_id: str):
+    return _run(svc().incident_detail, incident_id)
 
 
-@router.post("/events/{event_id}/resolve")
-def resolve_event(event_id: str):
-    return simulation_service.resolve_event(event_id)
+@router.get("/tasks")
+def list_tasks():
+    return {"tasks": svc().tasks()}
 
 
-@router.post("/events/{event_id}/acknowledge")
-def acknowledge_event(event_id: str):
-    return simulation_service.acknowledge_event(event_id)
-
-
-@router.post("/agents/recharge")
-def recharge_fleet():
-    return simulation_service.recharge_fleet()
-
-
-# ============================================================
-# NETWORK & SELF-ORGANIZATION
-# ============================================================
+# ------------------------------------------------------------------ network & messages
 
 @router.get("/network")
-def get_network():
-    return simulation_service.get_network()
+def network():
+    return svc().network()
 
 
-@router.post("/network/recover")
-def recover_network():
-    return simulation_service.recover_network()
+@router.get("/messages")
+def live_messages(limit: int = Query(100, ge=1, le=600), type: Optional[str] = None,
+                  incident_id: Optional[str] = None, agent_id: Optional[str] = None):
+    return {"messages": svc().live_messages(limit, type, incident_id, agent_id)}
 
 
-# ============================================================
-# SIMULATION RESET & AGENT FAIL HELPER
-# ============================================================
-
-@router.post("/simulation/reset")
-def reset_simulation():
-    return simulation_service.reset()
-
-
-@router.post("/agents/fail-fire-agent")
-def fail_fire_agent():
-    return simulation_service.fail_fire_agent()
-
-
-# ============================================================
-# AUDIT LOG HISTORY & ANALYTICS
-# ============================================================
+# ------------------------------------------------------------------ stored history & analytics
 
 @router.get("/history")
-def get_history(
-    category: str = Query("ALL", description="Filter category: ALL, EVENT, ANOMALIES, CONSENSUS, FAILURES, RECOVERY, NETWORK, AGENTS"),
-    limit: int = Query(100, ge=1, le=500)
-):
-    return {
-        "history": simulation_service.get_history(category=category, limit=limit)
-    }
+def history(category: str = Query("ALL"), limit: int = Query(200, ge=1, le=1000),
+            incident_id: Optional[str] = None, agent_id: Optional[str] = None):
+    if category.upper() != "ALL" and category.upper() not in HISTORY_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"Unknown category. Use ALL or one of {HISTORY_CATEGORIES}")
+    return {"history": _run(svc().history, category, limit, incident_id, agent_id), "categories": HISTORY_CATEGORIES}
+
+
+@router.get("/history/messages")
+def stored_messages(limit: int = Query(200, ge=1, le=1000), type: Optional[str] = None,
+                    incident_id: Optional[str] = None):
+    return {"messages": _run(svc().stored_messages, limit, type, incident_id)}
+
+
+@router.get("/history/incidents")
+def stored_incidents(limit: int = Query(100, ge=1, le=500)):
+    return {"incidents": _run(svc().stored_incidents, limit)}
+
+
+@router.get("/history/incidents/{incident_id}/consensus")
+def stored_consensus(incident_id: str):
+    return {"rounds": _run(svc().stored_consensus, incident_id)}
+
+
+@router.get("/history/failures")
+def stored_failures(limit: int = Query(100, ge=1, le=500)):
+    return {"failures": _run(svc().stored_failures, limit)}
+
+
+@router.get("/history/task-events")
+def stored_task_events(limit: int = Query(200, ge=1, le=1000), incident_id: Optional[str] = None):
+    return {"events": _run(svc().stored_task_events, limit, incident_id)}
+
+
+@router.get("/history/network-events")
+def stored_network_events(limit: int = Query(50, ge=1, le=500)):
+    return {"events": _run(svc().stored_network_events, limit)}
 
 
 @router.get("/analytics")
-def get_analytics():
-    return simulation_service.get_analytics()
+def analytics():
+    return _run(svc().analytics)

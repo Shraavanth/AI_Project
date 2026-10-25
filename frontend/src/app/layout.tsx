@@ -1,49 +1,37 @@
-import type { Metadata } from "next";
-import { Plus_Jakarta_Sans, Lora, JetBrains_Mono } from "next/font/google";
+import type { Metadata, Viewport } from "next";
+import "@fontsource/barlow/400.css";
+import "@fontsource/barlow/500.css";
+import "@fontsource/barlow/600.css";
+import "@fontsource/barlow-semi-condensed/500.css";
+import "@fontsource/barlow-semi-condensed/600.css";
+import "leaflet/dist/leaflet.css";
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
-import Header from "@/components/Header";
-
-const sans = Plus_Jakarta_Sans({
-  subsets: ["latin"],
-  variable: "--font-sans",
-  display: "swap",
-});
-
-const serif = Lora({
-  subsets: ["latin"],
-  variable: "--font-serif",
-  style: ["normal", "italic"],
-  display: "swap",
-});
-
-const mono = JetBrains_Mono({
-  subsets: ["latin"],
-  variable: "--font-mono",
-  display: "swap",
-});
+import { SimulationProvider } from "@/components/SimulationProvider";
+import { Sidebar } from "@/components/Sidebar";
+import { Toasts } from "@/components/Toasts";
+import { OfflineNotice } from "@/components/OfflineNotice";
 
 export const metadata: Metadata = {
-  title: "Eco-Intelligence | Decentralized Environmental Monitoring",
-  description:
-    "Autonomous multi-agent environmental intelligence platform observing forest transects, sharing sensor evidence, and adapting without centralized authority.",
+  title: "EnvMAS - Environmental Multi-Agent Monitoring",
+  description: "Self-organizing multi-agent system for decentralized environmental monitoring and response.",
 };
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export const viewport: Viewport = { themeColor: "#DCEAF5", width: "device-width", initialScale: 1 };
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${sans.variable} ${serif.variable} ${mono.variable}`}>
-      <body className="bg-background text-primary-text flex h-screen overflow-hidden antialiased font-sans">
-        <Sidebar />
-        <div className="flex-1 flex flex-col min-w-0 overflow-hidden bg-background">
-          <Header />
-          <main className="flex-1 overflow-y-auto p-6 md:p-8 bg-background">
-            {children}
-          </main>
-        </div>
+    <html lang="en">
+      <body className="bg-[#DCEAF5] text-[#18344D]">
+        <SimulationProvider>
+          <div className="flex min-h-screen flex-col lg:h-screen lg:flex-row lg:overflow-hidden bg-[#DCEAF5]">
+            <Sidebar />
+            <main className="flex min-w-0 flex-1 flex-col lg:overflow-hidden bg-[#DCEAF5]">
+              <OfflineNotice />
+              <div className="min-h-0 flex-1 lg:overflow-y-auto scroll-thin">{children}</div>
+            </main>
+          </div>
+          <Toasts />
+        </SimulationProvider>
       </body>
     </html>
   );

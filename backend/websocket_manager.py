@@ -1,13 +1,13 @@
-import json
-from typing import List, Dict, Any
+"""
+Keeps track of connected WebSocket clients and pushes state updates to them.
+"""
+
+from typing import Any, List
+
 from fastapi import WebSocket
 
 
 class WebSocketManager:
-    """
-    Manages active WebSocket client connections and broadcasts
-    state changes (telemetry, incidents, network reorganizations, audit logs).
-    """
 
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -20,25 +20,21 @@ class WebSocketManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
+    async def send(self, websocket: WebSocket, event_type: str, data: Any):
+        await websocket.send_json({"type": event_type, "data": data})
+
     async def broadcast(self, event_type: str, data: Any):
         if not self.active_connections:
             return
-
-        payload = {
-            "type": event_type,
-            "data": data
-        }
-
-        # Send asynchronously to all connected clients
-        dead_connections = []
-        for connection in self.active_connections:
+        payload = {"type": event_type, "data": data}
+        dead = []
+        for connection in list(self.active_connections):
             try:
                 await connection.send_json(payload)
             except Exception:
-                dead_connections.append(connection)
-
-        for dead in dead_connections:
-            self.disconnect(dead)
+                dead.append(connection)
+        for connection in dead:
+            self.disconnect(connection)
 
 
 ws_manager = WebSocketManager()

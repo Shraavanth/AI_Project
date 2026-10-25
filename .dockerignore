@@ -1,0 +1,8 @@
+frontend/
+legacy/
+Project_Presentation/
+venv/
+.venv/
+**/__pycache__/
+data/*.db*
+.env

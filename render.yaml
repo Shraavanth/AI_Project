@@ -1,11 +1,18 @@
+# Render blueprint for the FastAPI backend.
+# Render's free disk is wiped on every deploy, so set DATABASE_URL to a
+# Supabase/PostgreSQL database if you want history to survive redeploys.
 services:
   - type: web
-    name: env-mas-backend
-    env: python
-    buildCommand: pip install -r requirements.txt
+    name: envmas-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && python ai/train_model.py
     startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: DATABASE_URL
-        value: sqlite:///./environmental_mas.db
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

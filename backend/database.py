@@ -1,51 +1,54 @@
+"""
+Database connection.
+
+Default: a local SQLite file at data/environmental_mas.db (no account needed).
+Production: set DATABASE_URL to a PostgreSQL / Supabase connection string, e.g.
+    postgresql://postgres:<password>@db.<project>.supabase.co:5432/postgres
+"""
+
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 
-# ============================================================
-# DATABASE CONFIGURATION
-# ============================================================
-# Uses PostgreSQL/Supabase if DATABASE_URL is configured,
-# otherwise safely falls back to local SQLite for seamless offline testing.
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "sqlite:///./environmental_mas.db"
-)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
-# Handle postgres:// vs postgresql:// for compatibility with Render/Supabase
+DEFAULT_SQLITE_PATH = os.path.join(PROJECT_ROOT, "data", "environmental_mas.db")
+DATABASE_URL = os.getenv("DATABASE_URL") or f"sqlite:///{DEFAULT_SQLITE_PATH}"
+
+# Render / Heroku style URLs use postgres:// which SQLAlchemy no longer accepts
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-connect_args = {}
-if DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args=connect_args,
-    pool_pre_ping=True
-)
+connect_args = {"check_same_thread": False, "timeout": 15} if IS_SQLITE else {}
+if IS_SQLITE:
+    os.makedirs(os.path.dirname(DEFAULT_SQLITE_PATH), exist_ok=True)
 
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
+engine = create_engine(DATABASE_URL, connect_args=connect_args, pool_pre_ping=True)
 
+if IS_SQLITE:
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _record):
+        # WAL lets the API read history while the simulation loop is writing
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
-def get_db():
-    """FastAPI database session dependency."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def database_label() -> str:
+    if IS_SQLITE:
+        return "SQLite (local file)"
+    return "PostgreSQL"
 
 
 def init_db():
-    """Initialize database tables."""
+    from backend import models  # noqa: F401  (registers the tables)
     Base.metadata.create_all(bind=engine)

@@ -1,27 +1,39 @@
+"""
+Quick look at the training dataset.
+
+    python ai/analyze_data.py
+
+Prints summary statistics. If matplotlib is installed it also shows histograms
+(matplotlib is optional and not needed by the web application).
+"""
+
+import os
+
 import pandas as pd
-import matplotlib.pyplot as plt
 
-# Load the environmental dataset
-data = pd.read_csv("../data/environmental_data.csv")
+try:
+    from ai.generate_dataset import DATASET_PATH, save_dataset
+except ImportError:
+    from generate_dataset import DATASET_PATH, save_dataset
 
-print("Dataset shape:")
-print(data.shape)
+if not os.path.exists(DATASET_PATH):
+    save_dataset()
 
-print("\nColumn names:")
-print(data.columns.tolist())
+data = pd.read_csv(DATASET_PATH)
 
-print("\nFirst 5 rows:")
-print(data.head())
+print("Dataset shape:", data.shape)
+print("\nColumns:", data.columns.tolist())
+print("\nFirst 5 rows:\n", data.head())
+print("\nStatistical summary:\n", data.describe().round(2))
+print("\nMissing values:\n", data.isnull().sum())
+print("\nCorrelation matrix:\n", data.corr().round(2))
 
-print("\nStatistical summary:")
-print(data.describe())
+try:
+    import matplotlib.pyplot as plt
 
-print("\nMissing values:")
-print(data.isnull().sum())
-
-# Plot histograms for all environmental parameters
-data.hist(figsize=(12, 8))
-
-plt.suptitle("Environmental Data Distribution", fontsize=16)
-plt.tight_layout()
-plt.show()
+    data.hist(figsize=(12, 8))
+    plt.suptitle("Environmental Data Distribution", fontsize=16)
+    plt.tight_layout()
+    plt.show()
+except ImportError:
+    print("\n(matplotlib not installed - skipping histograms)")

@@ -1,39 +1,68 @@
-import pandas as pd
-from sklearn.ensemble import IsolationForest
+"""
+Train the Isolation Forest anomaly detector and save it with Joblib.
+
+The model only learns what NORMAL readings look like. Anything far away from
+that region is reported as an ANOMALY. Deciding *which* kind of anomaly it is
+(fire, pollution, heat) is done separately by ai/event_classifier.py.
+
+Run from anywhere:
+    python ai/train_model.py
+"""
+
+import os
+
 import joblib
+import pandas as pd
+import sklearn
+from sklearn.ensemble import IsolationForest
 
-# Load dataset
-data = pd.read_csv("../data/environmental_data.csv")
+try:
+    from ai.generate_dataset import DATASET_PATH, FEATURES, save_dataset
+except ImportError:  # running as a plain script from inside ai/
+    from generate_dataset import DATASET_PATH, FEATURES, save_dataset
 
-# Features used by the AI model
-features = [
-    "temperature",
-    "humidity",
-    "smoke",
-    "co2",
-    "air_quality",
-    "soil_moisture"
-]
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
+MODEL_PATH = os.path.join(MODEL_DIR, "environmental_anomaly_model.pkl")
 
-X = data[features]
+# 1% of the (synthetic, noisy) training data is treated as outliers.
+# The first version used 5%, which flagged about 1 in 20 perfectly normal
+# readings - far too many false alarms for 20 agents reading every second.
+CONTAMINATION = 0.01
+N_ESTIMATORS = 200
 
-# Create Isolation Forest model
-model = IsolationForest(
-    n_estimators=200,
-    contamination=0.05,
-    random_state=42
-)
 
-# Train the model
-model.fit(X)
+def train_and_save(dataset_path: str = DATASET_PATH, model_path: str = MODEL_PATH) -> dict:
+    if not os.path.exists(dataset_path):
+        save_dataset(dataset_path)
 
-# Save the trained model
-joblib.dump(model, "../models/environmental_anomaly_model.pkl")
+    data = pd.read_csv(dataset_path)
+    X = data[FEATURES].to_numpy(dtype=float)
 
-print("Model trained successfully!")
-print("Features used:")
-for feature in features:
-    print(f"- {feature}")
+    model = IsolationForest(
+        n_estimators=N_ESTIMATORS,
+        contamination=CONTAMINATION,
+        random_state=42,
+    )
+    model.fit(X)
 
-print("\nModel saved to:")
-print("../models/environmental_anomaly_model.pkl")
+    bundle = {
+        "model": model,
+        "features": FEATURES,
+        "contamination": CONTAMINATION,
+        "n_estimators": N_ESTIMATORS,
+        "training_samples": int(len(X)),
+        "sklearn_version": sklearn.__version__,
+    }
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    joblib.dump(bundle, model_path)
+    return bundle
+
+
+if __name__ == "__main__":
+    info = train_and_save()
+    print("Model trained successfully!")
+    print(f"Training samples: {info['training_samples']}")
+    print(f"Estimators: {info['n_estimators']}, contamination: {info['contamination']}")
+    print("Features:", ", ".join(info["features"]))
+    print(f"Saved to: {MODEL_PATH}")
